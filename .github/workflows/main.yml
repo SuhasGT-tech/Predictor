@@ -18,13 +18,17 @@ jobs:
       - name: Only run every 2 days
         id: gate
         run: |
-          DOY=$(date +%j)
-          if [ $((10#$DOY % 2)) -eq 0 ]; then
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "run=false" >> "$GITHUB_OUTPUT"
+            DOY=$(date +%j)
+            if [ $((10#$DOY % 2)) -eq 0 ]; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "run=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
-
+          
       - name: Set up Python
         if: steps.gate.outputs.run == 'true'
         uses: actions/setup-python@v5
