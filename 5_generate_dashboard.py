@@ -117,6 +117,128 @@ def build_future_row(market_hist, feature_cols, target_date, metrics):
     return pd.DataFrame([{c: row[c] for c in feature_cols}]), festival_name
 
 
+MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June",
+               "July", "August", "September", "October", "November", "December"]
+
+
+def compute_seasonality(g):
+    """
+    For each historical row, express its price as a ratio to that YEAR's
+    average price (this detrends 24 years of inflation/growth so we're
+    comparing pure calendar-month seasonality, not "prices were higher
+    recently because prices are higher recently").
+    Returns a list of {month, month_name, index} sorted by month, plus
+    the single best month to sell (highest average ratio).
+    """
+    g = g.copy()
+    g["year"] = g["Date"].dt.year
+    yearly_mean = g.groupby("year")["Modal"].transform("mean")
+    g["seasonal_ratio"] = g["Modal"] / yearly_mean
+
+    by_month = g.groupby(g["Date"].dt.month)["seasonal_ratio"].agg(["mean", "count"])
+    by_month = by_month[by_month["count"] >= 3]  # need a few observations to trust it
+
+    result = [
+        {"month": int(m), "month_name": MONTH_NAMES[int(m)],
+         "index": round((row["mean"] - 1) * 100, 1)}
+        for m, row in by_month.iterrows()
+    ]
+    result.sort(key=lambda r: r["month"])
+
+    if result:
+        best = max(result, key=lambda r: r["index"])
+        worst = min(result, key=lambda r: r["index"])
+    else:
+        best = worst = None
+
+    return result, best, worst
+
+
+def forecast_horizon(market, g, model, feature_cols, metrics, n_tenders=10):
+    """
+    Recursively forecast the next `n_tenders` tender days for this market,
+    feeding each prediction back in as if it were the "actual" price for
+    the next step's lag features. This is how you get a multi-week outlook
+    instead of just a single next-day number.
+
+    CAVEAT (also shown in the dashboard): external factors (weather, global
+    oil price, fx rate) are held at their most recent known value for every
+    future step, since we can't know them in advance. Accuracy naturally
+    degrades the further out you look - treat this as a directional guide
+    ("prices look like they're drifting up/down, and here's roughly why"),
+    not a precise multi-week price quote.
+    """
+    g = g.sort_values("Date")
+    medians = metrics.get("feature_medians", {})
+
+    # Rolling state we'll update as we "generate" future prices
+    recent_prices = g["Modal"].tail(12).tolist()  # most recent last
+    recent_arrivals = g["Arrivals"].tail(4).tolist()
+    current_date = datetime.now()
+    start_of_history = g["Date"].min().to_pydatetime()
+
+    static_ext = {
+        "coconut_oil_price_usd_per_mt": g["coconut_oil_price_usd_per_mt"].dropna().iloc[-1]
+            if "coconut_oil_price_usd_per_mt" in g and g["coconut_oil_price_usd_per_mt"].notna().any() else medians.get("coconut_oil_price_usd_per_mt", 0),
+        "coconut_oil_price_change_1m": g["coconut_oil_price_change_1m"].dropna().iloc[-1]
+            if "coconut_oil_price_change_1m" in g and g["coconut_oil_price_change_1m"].notna().any() else medians.get("coconut_oil_price_change_1m", 0),
+        "usd_inr_rate": g["usd_inr_rate"].dropna().iloc[-1]
+            if "usd_inr_rate" in g and g["usd_inr_rate"].notna().any() else medians.get("usd_inr_rate", 0),
+        "rainfall_mm": g["rainfall_mm"].tail(30).mean() if "rainfall_mm" in g else medians.get("rainfall_mm", 0),
+        "temp_c": g["temp_c"].tail(30).mean() if "temp_c" in g else medians.get("temp_c", 0),
+        "rainfall_roll_90": g["rainfall_roll_90"].dropna().iloc[-1]
+            if "rainfall_roll_90" in g and g["rainfall_roll_90"].notna().any() else medians.get("rainfall_roll_90", 0),
+    }
+
+    forecast_points = []
+    festival_hits = []
+
+    for _ in range(n_tenders):
+        target_date = next_tender_date(market, current_date)
+        festival_flag, festival_name = is_festival_window_for(target_date)
+
+        lag1 = recent_prices[-1] if recent_prices else medians.get("modal_lag_1", 0)
+        lag2 = recent_prices[-2] if len(recent_prices) >= 2 else lag1
+        lag3 = recent_prices[-3] if len(recent_prices) >= 3 else lag2
+        roll4 = pd.Series(recent_prices[-4:])
+        roll12 = pd.Series(recent_prices[-12:])
+
+        row = {
+            "modal_lag_1": lag1, "modal_lag_2": lag2, "modal_lag_3": lag3,
+            "modal_roll_mean_4": roll4.mean(), "modal_roll_std_4": roll4.std(),
+            "modal_roll_mean_12": roll12.mean(),
+            "price_momentum": lag1 - lag2,
+            "arrivals_lag_1": recent_arrivals[-1] if recent_arrivals else medians.get("arrivals_lag_1", 0),
+            "arrivals_roll_mean_4": (pd.Series(recent_arrivals).mean() if recent_arrivals else medians.get("arrivals_roll_mean_4", 0)),
+            "day_of_week": target_date.weekday(), "month": target_date.month, "year": target_date.year,
+            "days_since_start": (target_date - start_of_history).days,
+            "is_tiptur_tenderday": int(target_date.weekday() in TENDER_DAYS["TIPTUR"]),
+            "is_arsikere_tenderday": int(target_date.weekday() in TENDER_DAYS["ARSIKERE"]),
+            "is_festival_window": festival_flag,
+            **static_ext,
+        }
+        for col in feature_cols:
+            if col not in row or pd.isna(row[col]):
+                row[col] = medians.get(col, 0)
+
+        X = pd.DataFrame([{c: row[c] for c in feature_cols}])
+        pred = float(model.predict(X)[0])
+
+        forecast_points.append({
+            "date": target_date.strftime("%Y-%m-%d"),
+            "modal": round(pred),
+            "festival": festival_name if festival_flag else None,
+        })
+        if festival_flag:
+            festival_hits.append({"date": target_date.strftime("%Y-%m-%d"), "name": festival_name})
+
+        recent_prices.append(pred)
+        recent_arrivals.append(recent_arrivals[-1] if recent_arrivals else 0)
+        current_date = target_date
+
+    return forecast_points, festival_hits
+
+
 def predict_market(market, df):
     model_path = os.path.join(MODELS_DIR, f"model_{market.lower()}.joblib")
     cols_path = os.path.join(MODELS_DIR, f"feature_cols_{market.lower()}.json")
@@ -143,6 +265,9 @@ def predict_market(market, df):
     history = [{"date": d.strftime("%Y-%m-%d"), "modal": float(m)} for d, m in
                zip(recent["Date"], recent["Modal"])]
 
+    seasonality, best_month, worst_month = compute_seasonality(g)
+    forecast_points, festival_hits = forecast_horizon(market, g, model, feature_cols, metrics, n_tenders=10)
+
     last_actual = g.sort_values("Date")["Modal"].iloc[-1]
     last_date = g.sort_values("Date")["Date"].iloc[-1]
 
@@ -161,6 +286,11 @@ def predict_market(market, df):
         "top_features": metrics.get("top_features", []),
         "history": history,
         "festival_note": festival_name,
+        "seasonality": seasonality,
+        "best_month": best_month,
+        "worst_month": worst_month,
+        "forecast_points": forecast_points,
+        "festival_hits": festival_hits,
     }
 
 
@@ -248,6 +378,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     background: rgba(74,93,58,0.15); border: 1px solid var(--leaf-green); border-radius: 4px; padding: 6px;
   }
 
+  .outlook-list { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+  .outlook-item { display: flex; gap: 10px; align-items: flex-start; line-height: 1.4; }
+  .outlook-icon { flex-shrink: 0; font-size: 15px; }
+  .outlook-item b { color: var(--coir-gold); }
+  .outlook-item.upcoming-festival { color: var(--leaf-green); }
+  .outlook-item.upcoming-festival b { color: var(--leaf-green); }
+
   canvas { background: #241b12; border-radius: 6px; }
   .chart-wrap { background: linear-gradient(180deg, #2a1f16, #1f170f); border: 1px solid #5a4530;
     border-radius: 6px; padding: 16px; margin-bottom: 20px; }
@@ -273,8 +410,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
   <div class="chart-wrap">
-    <h3>Recent Price Trend (last 60 tender days, both markets)</h3>
+    <h3>Price Trend + 10-Tender Outlook (dashed = forecast)</h3>
     <canvas id="trendChart" height="90"></canvas>
+  </div>
+
+  <div class="boards">
+    __OUTLOOK_CARDS__
+  </div>
+
+  <div class="chart-wrap">
+    <h3>Seasonality — average price vs. that year's own average, by month (24-yr history)</h3>
+    <canvas id="seasonChart" height="80"></canvas>
   </div>
 
   <div class="boards">
@@ -283,7 +429,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
   <footer>
     Predictions are a statistical estimate from historical patterns, not a guarantee &mdash;
-    treat as one input alongside your own market knowledge.<br>
+    treat as one input alongside your own market knowledge. The 10-tender outlook assumes
+    weather/global-price/fx stay near their current levels, so treat it as directional,
+    not a precise multi-week quote.<br>
     Re-run 1_scrape_incremental.py &rarr; 2_fetch_external_factors.py &rarr; 3_build_features.py &rarr;
     4_train_model.py &rarr; 5_generate_dashboard.py to refresh.
   </footer>
@@ -292,25 +440,51 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-date-fns/3.0.0/chartjs-adapter-date-fns.bundle.min.js"></script>
 <script>
 const trendData = __TREND_DATA__;
+const seasonData = __SEASON_DATA__;
 
 const ctx = document.getElementById('trendChart');
+const trendDatasets = [];
+trendData.forEach(d => {
+  const color = d.market === 'TIPTUR' ? '#b8862b' : '#4a5d3a';
+  trendDatasets.push({
+    label: d.market + ' (actual)',
+    data: d.history.map(h => ({x: h.date, y: h.modal})),
+    borderColor: color, backgroundColor: 'transparent', tension: 0.2, pointRadius: 2,
+  });
+  const bridge = d.history.length ? [d.history[d.history.length - 1]] : [];
+  trendDatasets.push({
+    label: d.market + ' (forecast)',
+    data: bridge.concat(d.forecast).map(h => ({x: h.date, y: h.modal})),
+    borderColor: color, backgroundColor: 'transparent', borderDash: [6, 4],
+    tension: 0.2, pointRadius: 2,
+  });
+});
+
 new Chart(ctx, {
   type: 'line',
-  data: {
-    datasets: trendData.map(d => ({
-      label: d.market,
-      data: d.history.map(h => ({x: h.date, y: h.modal})),
-      borderColor: d.market === 'TIPTUR' ? '#b8862b' : '#4a5d3a',
-      backgroundColor: 'transparent',
-      tension: 0.2,
-      pointRadius: 2,
-    }))
-  },
+  data: { datasets: trendDatasets },
   options: {
     responsive: true,
     scales: {
       x: { type: 'time', time: { unit: 'month' }, ticks: { color: '#a99a80' }, grid: { color: '#3a2c1d' } },
       y: { ticks: { color: '#a99a80' }, grid: { color: '#3a2c1d' }, title: { display: true, text: 'Rs / Quintal', color: '#a99a80' } }
+    },
+    plugins: { legend: { labels: { color: '#f2e8d5', font: { size: 10 } } } }
+  }
+});
+
+new Chart(document.getElementById('seasonChart'), {
+  type: 'bar',
+  data: {
+    labels: seasonData.labels,
+    datasets: seasonData.datasets,
+  },
+  options: {
+    responsive: true,
+    scales: {
+      x: { ticks: { color: '#a99a80' }, grid: { color: '#3a2c1d' } },
+      y: { ticks: { color: '#a99a80' }, grid: { color: '#3a2c1d' },
+           title: { display: true, text: '% vs. that year\\'s average', color: '#a99a80' } }
     },
     plugins: { legend: { labels: { color: '#f2e8d5' } } }
   }
@@ -343,6 +517,13 @@ FEATURE_CARD_TEMPLATE = """
 <div class="board">
   <div class="board-head"><h2 style="font-size:15px;">{market} -- what's driving it</h2></div>
   <div class="features">{feature_rows}</div>
+</div>
+"""
+
+OUTLOOK_CARD_TEMPLATE = """
+<div class="board">
+  <div class="board-head"><h2 style="font-size:15px;">{market} -- outlook</h2></div>
+  <div class="outlook-list">{items}</div>
 </div>
 """
 
@@ -393,6 +574,53 @@ def render_feature_card(res):
     return FEATURE_CARD_TEMPLATE.format(market=res["market"], feature_rows=rows)
 
 
+def render_outlook_card(res):
+    if res is None:
+        return ""
+    items = []
+
+    if res.get("best_month"):
+        bm = res["best_month"]
+        sign = "+" if bm["index"] >= 0 else ""
+        items.append(
+            f"<div class='outlook-item'><span class='outlook-icon'>&#128200;</span>"
+            f"<span>Historically, <b>{bm['month_name']}</b> tends to run <b>{sign}{bm['index']}%</b> "
+            f"above that year's average price — the strongest month on record for {res['market'].title()}.</span></div>"
+        )
+    if res.get("worst_month"):
+        wm = res["worst_month"]
+        items.append(
+            f"<div class='outlook-item'><span class='outlook-icon'>&#128201;</span>"
+            f"<span>Historically weakest: <b>{wm['month_name']}</b> ({wm['index']}% vs. yearly average) — "
+            f"selling then has usually meant a lower price.</span></div>"
+        )
+
+    if res.get("forecast_points"):
+        last = res["forecast_points"][-1]
+        first = res["forecast_points"][0]
+        drift = last["modal"] - res["last_actual"]
+        direction = "up" if drift > 0 else "down" if drift < 0 else "flat"
+        items.append(
+            f"<div class='outlook-item'><span class='outlook-icon'>&#128336;</span>"
+            f"<span>Over the next {len(res['forecast_points'])} tenders (through {last['date']}), "
+            f"the model's directional read is <b>trending {direction}</b> "
+            f"(Rs {abs(drift):,} {'higher' if drift > 0 else 'lower' if drift < 0 else 'change'} by then) — "
+            f"treat this as a rough trend, not a locked-in price.</span></div>"
+        )
+
+    for hit in (res.get("festival_hits") or [])[:3]:
+        items.append(
+            f"<div class='outlook-item upcoming-festival'><span class='outlook-icon'>&#127881;</span>"
+            f"<span><b>{hit['name']}</b> falls around {hit['date']} — festival demand windows have "
+            f"historically coincided with firmer coconut/copra prices.</span></div>"
+        )
+
+    if not items:
+        items.append("<div class='outlook-item'><span>Not enough history yet to build an outlook.</span></div>")
+
+    return OUTLOOK_CARD_TEMPLATE.format(market=res["market"], items="".join(items))
+
+
 def main():
     if not os.path.exists(FEATURES_CSV):
         print(f"{FEATURES_CSV} not found -- run 3_build_features.py first.")
@@ -413,16 +641,37 @@ def main():
 
     board_cards = "".join(render_board_card(r) for r in results)
     feature_cards = "".join(render_feature_card(r) for r in results)
+    outlook_cards = "".join(render_outlook_card(r) for r in results)
     trend_data = [
-        {"market": r["market"], "history": r["history"]} for r in results if r is not None
+        {"market": r["market"], "history": r["history"], "forecast": r["forecast_points"]}
+        for r in results if r is not None
     ]
+
+    all_months = list(range(1, 13))
+    season_datasets = []
+    colors = {"TIPTUR": "#b8862b", "ARSIKERE": "#4a5d3a"}
+    for r in results:
+        if r is None:
+            continue
+        by_month = {s["month"]: s["index"] for s in r["seasonality"]}
+        season_datasets.append({
+            "label": r["market"],
+            "data": [by_month.get(m, 0) for m in all_months],
+            "backgroundColor": colors.get(r["market"], "#888"),
+        })
+    season_data = {
+        "labels": [MONTH_NAMES[m][:3] for m in all_months],
+        "datasets": season_datasets,
+    }
 
     html = (
         HTML_TEMPLATE
         .replace("__GENERATED_AT__", datetime.now().strftime("%Y-%m-%d %H:%M"))
         .replace("__BOARD_CARDS__", board_cards)
         .replace("__FEATURE_CARDS__", feature_cards)
+        .replace("__OUTLOOK_CARDS__", outlook_cards)
         .replace("__TREND_DATA__", json.dumps(trend_data))
+        .replace("__SEASON_DATA__", json.dumps(season_data))
     )
 
     with open(OUT_HTML, "w", encoding="utf-8") as f:
