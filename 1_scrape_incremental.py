@@ -104,22 +104,30 @@ def get_asp_tokens(session):
     }
 
 
-def fetch_report_html(session, month_val, year, market_val):
-    tokens = get_asp_tokens(session)
-    payload = {
-        "__EVENTTARGET": "",
-        "__EVENTARGUMENT": "",
-        "__LASTFOCUS": "",
-        **tokens,
-        FIELD_MONTH: month_val,
-        FIELD_YEAR: str(year),
-        FIELD_COMMODITY: COMMODITY_COPRA,
-        FIELD_MARKET: market_val,
-        FIELD_VIEWREPORT: "View Report",
-    }
-    resp = session.post(BASE_URL, data=payload, headers=HEADERS, timeout=30)
-    resp.raise_for_status()
-    return resp.text
+def fetch_report_html(session, month_val, year, market_val, max_retries=2):
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            tokens = get_asp_tokens(session)
+            payload = {
+                "__EVENTTARGET": "",
+                "__EVENTARGUMENT": "",
+                "__LASTFOCUS": "",
+                **tokens,
+                FIELD_MONTH: month_val,
+                FIELD_YEAR: str(year),
+                FIELD_COMMODITY: COMMODITY_COPRA,
+                FIELD_MARKET: market_val,
+                FIELD_VIEWREPORT: "View Report",
+            }
+            resp = session.post(BASE_URL, data=payload, headers=HEADERS, timeout=60)
+            resp.raise_for_status()
+            return resp.text
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                time.sleep(5)
+    raise last_error
 
 
 def parse_table(html):

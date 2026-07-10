@@ -25,13 +25,13 @@ STEPS = [
 
 
 def run(script):
-    print("\n" + "=" * 70)
-    print(f"RUNNING {script}")
-    print("=" * 70)
-    result = subprocess.run([sys.executable, script])
+    print("\n" + "=" * 70, flush=True)
+    print(f"RUNNING {script}", flush=True)
+    print("=" * 70, flush=True)
+    result = subprocess.run([sys.executable, "-u", script])
     if result.returncode != 0:
         print(f"\n!! {script} exited with an error (code {result.returncode}). "
-              f"Continuing to the next step anyway.")
+              f"Continuing to the next step anyway.", flush=True)
 
 
 def main():
