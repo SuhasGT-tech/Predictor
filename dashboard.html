@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Copra Price Board -- Arasikere &amp; Tiptur</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+  :root {
+    --husk-brown: #3d2b1f;
+    --copra-cream: #f2e8d5;
+    --coir-gold: #b8862b;
+    --leaf-green: #4a5d3a;
+    --board-black: #1c1712;
+    --up-red: #a63d2f;
+    --down-green: #3f6b4a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--board-black);
+    color: var(--copra-cream);
+    font-family: 'Courier New', ui-monospace, monospace;
+    padding: 24px 16px 60px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  header {
+    text-align: center;
+    border-bottom: 3px double var(--coir-gold);
+    padding-bottom: 16px;
+    margin-bottom: 28px;
+  }
+  header h1 {
+    font-family: Georgia, 'Times New Roman', serif;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    font-size: 28px;
+    margin: 0 0 4px;
+    color: var(--coir-gold);
+  }
+  header p { margin: 0; color: #a99a80; font-size: 13px; letter-spacing: 1px; }
+
+  .boards { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 28px; }
+  @media (max-width: 760px) { .boards { grid-template-columns: 1fr; } }
+
+  .board {
+    background: linear-gradient(180deg, #2a1f16, #1f170f);
+    border: 1px solid #5a4530;
+    border-radius: 6px;
+    padding: 20px;
+  }
+  .board-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-bottom: 1px dashed #5a4530; padding-bottom: 10px; margin-bottom: 14px;
+  }
+  .board-head h2 {
+    margin: 0; font-family: Georgia, serif; font-size: 20px;
+    letter-spacing: 2px; color: var(--copra-cream);
+  }
+  .tender-tag {
+    font-size: 11px; color: var(--board-black); background: var(--coir-gold);
+    padding: 3px 8px; border-radius: 3px; letter-spacing: 1px;
+  }
+  .flap {
+    display: flex; gap: 6px; justify-content: center; margin: 14px 0 10px;
+  }
+  .flap span {
+    display: inline-block; background: #0e0b08; color: var(--coir-gold);
+    font-size: 40px; font-weight: bold; padding: 6px 4px; border-radius: 4px;
+    min-width: 30px; text-align: center; border: 1px solid #4a3826;
+    text-shadow: 0 0 6px rgba(184,134,43,0.5);
+  }
+  .price-label { text-align: center; font-size: 12px; color: #a99a80; letter-spacing: 2px; margin-bottom: 2px; }
+  .predicted-for { text-align: center; font-size: 13px; color: var(--copra-cream); margin-bottom: 16px; }
+  .predicted-for b { color: var(--coir-gold); }
+  .delta { text-align: center; font-size: 15px; margin-bottom: 6px; }
+  .delta.up { color: var(--up-red); }
+  .delta.down { color: var(--down-green); }
+  .meta-row { display: flex; justify-content: space-between; font-size: 12px; color: #a99a80; margin-top: 14px; }
+  .accuracy { font-size: 11px; color: #7d715e; text-align: center; margin-top: 10px; }
+  .festival-note {
+    margin-top: 10px; font-size: 12px; text-align: center; color: var(--leaf-green);
+    background: rgba(74,93,58,0.15); border: 1px solid var(--leaf-green); border-radius: 4px; padding: 6px;
+  }
+
+  canvas { background: #241b12; border-radius: 6px; }
+  .chart-wrap { background: linear-gradient(180deg, #2a1f16, #1f170f); border: 1px solid #5a4530;
+    border-radius: 6px; padding: 16px; margin-bottom: 20px; }
+  .chart-wrap h3 { margin: 0 0 10px; font-family: Georgia, serif; font-size: 15px; color: var(--coir-gold); letter-spacing: 1px; }
+
+  .features { display: flex; flex-direction: column; gap: 6px; }
+  .feature-bar-row { display: grid; grid-template-columns: 160px 1fr 50px; align-items: center; gap: 8px; font-size: 12px; }
+  .feature-bar-bg { background: #14100b; border-radius: 3px; height: 12px; overflow: hidden; }
+  .feature-bar-fill { background: var(--coir-gold); height: 100%; }
+
+  footer { text-align: center; color: #675a48; font-size: 11px; margin-top: 30px; letter-spacing: 1px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Copra Tender Price Board</h1>
+    <p>Arasikere (Tue &amp; Fri) &middot; Tiptur (Mon &amp; Thu) &middot; generated 2026-07-10 18:26</p>
+  </header>
+
+  <div class="boards">
+    
+<div class="board">
+  <div class="board-head">
+    <h2>TIPTUR</h2>
+    <span class="tender-tag">NEXT TENDER: Monday 2026-07-13</span>
+  </div>
+  <div class="price-label">PREDICTED MODAL PRICE</div>
+  <div class="flap"><span>3</span><span>1</span><span>,</span><span>5</span><span>8</span><span>7</span></div>
+  <div class="predicted-for">for <b>Monday, 2026-07-13</b></div>
+  <div class="delta up">&#9650; Rs 587 (1.9%) vs last actual (Rs 31,000 on 2026-07-09)</div>
+  
+  <div class="meta-row">
+    <span>Model: RandomForest</span>
+    <span>Validation MAPE: 7.2%</span>
+  </div>
+  <div class="accuracy">Typical error: &plusmn; Rs 1,589 / quintal (from backtest on held-out recent data)</div>
+</div>
+
+<div class="board">
+  <div class="board-head">
+    <h2>ARSIKERE</h2>
+    <span class="tender-tag">NEXT TENDER: Tuesday 2026-07-14</span>
+  </div>
+  <div class="price-label">PREDICTED MODAL PRICE</div>
+  <div class="flap"><span>3</span><span>1</span><span>,</span><span>7</span><span>8</span><span>0</span></div>
+  <div class="predicted-for">for <b>Tuesday, 2026-07-14</b></div>
+  <div class="delta up">&#9650; Rs 1,780 (5.9%) vs last actual (Rs 30,000 on 2026-07-08)</div>
+  
+  <div class="meta-row">
+    <span>Model: RandomForest</span>
+    <span>Validation MAPE: 18.1%</span>
+  </div>
+  <div class="accuracy">Typical error: &plusmn; Rs 4,650 / quintal (from backtest on held-out recent data)</div>
+</div>
+
+  </div>
+
+  <div class="chart-wrap">
+    <h3>Recent Price Trend (last 60 tender days, both markets)</h3>
+    <canvas id="trendChart" height="90"></canvas>
+  </div>
+
+  <div class="boards">
+    
+<div class="board">
+  <div class="board-head"><h2 style="font-size:15px;">TIPTUR -- what's driving it</h2></div>
+  <div class="features"><div class='feature-bar-row'><span>modal_lag_1</span><div class='feature-bar-bg'><div class='feature-bar-fill' style='width:100%'></div></div><span>0.82</span></div><div class='feature-bar-row'><span>modal_roll_mean_12</span><div class='feature-bar-bg'><div class='feature-bar-fill' style='width:11%'></div></div><span>0.09</span></div><div class='feature-bar-row'><span>modal_roll_mean_4</span><div class='feature-bar-bg'><div class='feature-bar-fill' style='width:7%'></div></div><span>0.06</span></div><div class='feature-bar-row'><span>modal_lag_3</span><div class='feature-bar-bg'><div class='feature-bar-fill' style='width:1%'></div></div><span>0.01</span></div><div class='feature-bar-row'><span>days_since_start</span><div class='feature-bar-bg'><div class='feature-bar-fill' style='width:0%'></div></div><span>0.00</span></div><div class='feature-bar-row'><span>coconut_oil_price_usd_per_mt</span><div class='feature-bar-bg'><div class='feature-bar-fill' style='width:0%'></div></div><span>0.00</span></div></div>
+</div>
+
+<div class="board">
+  <div class="board-head"><h2 style="font-size:15px;">ARSIKERE -- what's driving it</h2></div>
+  <div class="features"><div class='feature-bar-row'><span>modal_roll_mean_4</span><div class='feature-bar-bg'><div class='feature-bar-fill' style='width:100%'></div></div><span>0.64</span></div><div class='feature-bar-row'><span>modal_lag_1</span><div class='feature-bar-bg'><div class='feature-bar-fill' style='width:28%'></div></div><span>0.18</span></div><div class='feature-bar-row'><span>modal_lag_2</span><div class='feature-bar-bg'><div class='feature-bar-fill' style='width:25%'></div></div><span>0.16</span></div><div class='feature-bar-row'><span>modal_lag_3</span><div class='feature-bar-bg'><div class='feature-bar-fill' style='width:1%'></div></div><span>0.00</span></div><div class='feature-bar-row'><span>modal_roll_mean_12</span><div class='feature-bar-bg'><div class='feature-bar-fill' style='width:1%'></div></div><span>0.00</span></div><div class='feature-bar-row'><span>Arrivals</span><div class='feature-bar-bg'><div class='feature-bar-fill' style='width:0%'></div></div><span>0.00</span></div></div>
+</div>
+
+  </div>
+
+  <footer>
+    Predictions are a statistical estimate from historical patterns, not a guarantee &mdash;
+    treat as one input alongside your own market knowledge.<br>
+    Re-run 1_scrape_incremental.py &rarr; 2_fetch_external_factors.py &rarr; 3_build_features.py &rarr;
+    4_train_model.py &rarr; 5_generate_dashboard.py to refresh.
+  </footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-date-fns/3.0.0/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script>
+const trendData = [{"market": "TIPTUR", "history": [{"date": "2025-11-24", "modal": 27594.0}, {"date": "2025-11-27", "modal": 27891.0}, {"date": "2025-12-01", "modal": 27500.0}, {"date": "2025-12-04", "modal": 28350.000000000004}, {"date": "2025-12-08", "modal": 28000.0}, {"date": "2025-12-11", "modal": 28080.0}, {"date": "2025-12-15", "modal": 28000.0}, {"date": "2025-12-18", "modal": 27800.0}, {"date": "2025-12-22", "modal": 28028.0}, {"date": "2025-12-29", "modal": 27810.0}, {"date": "2026-01-01", "modal": 28000.0}, {"date": "2026-01-05", "modal": 28332.0}, {"date": "2026-01-08", "modal": 28062.0}, {"date": "2026-01-12", "modal": 28080.0}, {"date": "2026-01-19", "modal": 28000.0}, {"date": "2026-01-22", "modal": 29034.0}, {"date": "2026-01-29", "modal": 30060.0}, {"date": "2026-02-02", "modal": 30000.0}, {"date": "2026-02-05", "modal": 30000.0}, {"date": "2026-02-09", "modal": 30015.0}, {"date": "2026-02-12", "modal": 29500.0}, {"date": "2026-02-16", "modal": 29907.0}, {"date": "2026-02-19", "modal": 30015.0}, {"date": "2026-02-23", "modal": 29691.000000000004}, {"date": "2026-02-26", "modal": 28404.0}, {"date": "2026-03-02", "modal": 29166.000000000004}, {"date": "2026-03-05", "modal": 29126.0}, {"date": "2026-03-09", "modal": 29000.0}, {"date": "2026-03-12", "modal": 30333.0}, {"date": "2026-03-16", "modal": 30000.0}, {"date": "2026-03-23", "modal": 30609.0}, {"date": "2026-03-26", "modal": 30366.0}, {"date": "2026-03-30", "modal": 30000.0}, {"date": "2026-04-02", "modal": 30000.0}, {"date": "2026-04-06", "modal": 31860.0}, {"date": "2026-04-09", "modal": 32000.0}, {"date": "2026-04-13", "modal": 36711.0}, {"date": "2026-04-16", "modal": 36000.0}, {"date": "2026-04-23", "modal": 35099.99999999999}, {"date": "2026-04-27", "modal": 32000.0}, {"date": "2026-04-30", "modal": 33336.0}, {"date": "2026-05-04", "modal": 33000.0}, {"date": "2026-05-07", "modal": 33000.0}, {"date": "2026-05-11", "modal": 33300.0}, {"date": "2026-05-14", "modal": 33133.0}, {"date": "2026-05-18", "modal": 32220.0}, {"date": "2026-05-21", "modal": 31000.0}, {"date": "2026-05-25", "modal": 30330.0}, {"date": "2026-06-01", "modal": 30600.0}, {"date": "2026-06-04", "modal": 30000.0}, {"date": "2026-06-08", "modal": 32345.0}, {"date": "2026-06-11", "modal": 33507.0}, {"date": "2026-06-15", "modal": 32005.0}, {"date": "2026-06-18", "modal": 30500.0}, {"date": "2026-06-22", "modal": 33333.0}, {"date": "2026-06-25", "modal": 32607.0}, {"date": "2026-06-29", "modal": 32238.0}, {"date": "2026-07-02", "modal": 30500.0}, {"date": "2026-07-06", "modal": 32202.0}, {"date": "2026-07-09", "modal": 31000.0}]}, {"market": "ARSIKERE", "history": [{"date": "2026-03-10", "modal": 28983.0}, {"date": "2026-03-11", "modal": 29000.0}, {"date": "2026-03-12", "modal": 29000.0}, {"date": "2026-03-13", "modal": 28649.0}, {"date": "2026-03-16", "modal": 29000.0}, {"date": "2026-03-17", "modal": 28847.0}, {"date": "2026-03-18", "modal": 30500.0}, {"date": "2026-03-20", "modal": 28880.0}, {"date": "2026-03-24", "modal": 29275.0}, {"date": "2026-03-25", "modal": 30100.0}, {"date": "2026-03-27", "modal": 29500.0}, {"date": "2026-03-31", "modal": 29696.0}, {"date": "2026-04-07", "modal": 30837.0}, {"date": "2026-04-08", "modal": 32200.0}, {"date": "2026-04-09", "modal": 30000.0}, {"date": "2026-04-10", "modal": 32349.000000000004}, {"date": "2026-04-17", "modal": 33122.0}, {"date": "2026-04-18", "modal": 34500.0}, {"date": "2026-04-21", "modal": 34635.0}, {"date": "2026-04-24", "modal": 33000.0}, {"date": "2026-04-27", "modal": 35000.0}, {"date": "2026-04-28", "modal": 32198.0}, {"date": "2026-04-30", "modal": 35000.0}, {"date": "2026-05-04", "modal": 33000.0}, {"date": "2026-05-05", "modal": 32700.0}, {"date": "2026-05-07", "modal": 33000.0}, {"date": "2026-05-08", "modal": 32164.0}, {"date": "2026-05-11", "modal": 32000.0}, {"date": "2026-05-12", "modal": 31920.0}, {"date": "2026-05-13", "modal": 33000.0}, {"date": "2026-05-15", "modal": 31413.0}, {"date": "2026-05-16", "modal": 33000.0}, {"date": "2026-05-19", "modal": 30622.0}, {"date": "2026-05-20", "modal": 32000.0}, {"date": "2026-05-22", "modal": 29230.0}, {"date": "2026-05-25", "modal": 30500.0}, {"date": "2026-05-26", "modal": 29424.0}, {"date": "2026-05-29", "modal": 29192.0}, {"date": "2026-06-02", "modal": 29799.0}, {"date": "2026-06-03", "modal": 30600.0}, {"date": "2026-06-04", "modal": 29000.0}, {"date": "2026-06-05", "modal": 29754.0}, {"date": "2026-06-08", "modal": 32000.0}, {"date": "2026-06-09", "modal": 30202.0}, {"date": "2026-06-10", "modal": 32650.0}, {"date": "2026-06-12", "modal": 30514.0}, {"date": "2026-06-15", "modal": 32500.0}, {"date": "2026-06-16", "modal": 30669.000000000004}, {"date": "2026-06-17", "modal": 31300.0}, {"date": "2026-06-19", "modal": 30475.0}, {"date": "2026-06-20", "modal": 32118.0}, {"date": "2026-06-23", "modal": 31237.000000000004}, {"date": "2026-06-25", "modal": 30000.0}, {"date": "2026-06-29", "modal": 32600.0}, {"date": "2026-06-30", "modal": 30311.0}, {"date": "2026-07-01", "modal": 30000.0}, {"date": "2026-07-02", "modal": 31500.0}, {"date": "2026-07-04", "modal": 31400.0}, {"date": "2026-07-07", "modal": 33000.0}, {"date": "2026-07-08", "modal": 30000.0}]}];
+
+const ctx = document.getElementById('trendChart');
+new Chart(ctx, {
+  type: 'line',
+  data: {
+    datasets: trendData.map(d => ({
+      label: d.market,
+      data: d.history.map(h => ({x: h.date, y: h.modal})),
+      borderColor: d.market === 'TIPTUR' ? '#b8862b' : '#4a5d3a',
+      backgroundColor: 'transparent',
+      tension: 0.2,
+      pointRadius: 2,
+    }))
+  },
+  options: {
+    responsive: true,
+    scales: {
+      x: { type: 'time', time: { unit: 'month' }, ticks: { color: '#a99a80' }, grid: { color: '#3a2c1d' } },
+      y: { ticks: { color: '#a99a80' }, grid: { color: '#3a2c1d' }, title: { display: true, text: 'Rs / Quintal', color: '#a99a80' } }
+    },
+    plugins: { legend: { labels: { color: '#f2e8d5' } } }
+  }
+});
+</script>
+</body>
+</html>
