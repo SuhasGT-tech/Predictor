@@ -31,6 +31,7 @@ automated schedule.
 """
 
 import os
+import re
 import json
 from datetime import datetime, timedelta
 
@@ -186,7 +187,8 @@ def send_sms(message):
     father_phone = os.environ.get("FATHER_PHONE_NUMBER")
     extra_phones = os.environ.get("EXTRA_PHONE_NUMBERS", "")  # comma-separated, e.g. your own number
 
-    phones = [p.strip() for p in [father_phone] + extra_phones.split(",") if p and p.strip()]
+    extra_list = [p.strip() for p in re.split(r"[,\n\s]+", extra_phones) if p.strip()]
+    phones = [p.strip() for p in [father_phone] + extra_list if p and p.strip()]
 
     if not (user and password and phones):
         print("Missing SMS_GATEWAY_USER / SMS_GATEWAY_PASS / phone number "
