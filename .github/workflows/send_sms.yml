@@ -25,8 +25,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run full pipeline (fresh data + model)
-        run: python run_all.py
+      - name: Build features, train model, generate dashboard
+        run: |
+          python 2_fetch_external_factors.py
+          python 3_build_features.py
+          python 4_train_model.py
+          python 5_generate_dashboard.py
 
       - name: Send Kannada SMS forecast
         env:
