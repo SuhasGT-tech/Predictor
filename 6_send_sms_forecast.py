@@ -139,13 +139,16 @@ def predict_next_tender():
         "temp_c": g["temp_c"].tail(30).mean() if "temp_c" in g else np.nan,
         "rainfall_roll_90": g["rainfall_roll_90"].dropna().iloc[-1]
             if "rainfall_roll_90" in g and g["rainfall_roll_90"].notna().any() else np.nan,
+        "other_market_last_price": g["other_market_last_price"].dropna().iloc[-1]
+            if "other_market_last_price" in g and g["other_market_last_price"].notna().any() else np.nan,
     }
     for col in feature_cols:
         if col not in row or pd.isna(row[col]):
             row[col] = medians.get(col, 0)
 
     X = pd.DataFrame([{c: row[c] for c in feature_cols}])
-    pred = round(float(model.predict(X)[0]))
+    pred_log_return = float(model.predict(X)[0])
+    pred = round(lag1 * np.exp(pred_log_return))
 
     best_month, best_pct = compute_best_month(g)
     best_month_kn = MONTH_NAMES_KN.get(best_month, "")

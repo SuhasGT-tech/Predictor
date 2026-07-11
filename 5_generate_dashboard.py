@@ -104,6 +104,8 @@ def build_future_row(market_hist, feature_cols, target_date, metrics):
         "temp_c": g["temp_c"].tail(30).mean() if "temp_c" in g else np.nan,
         "rainfall_roll_90": g["rainfall_roll_90"].dropna().iloc[-1]
             if "rainfall_roll_90" in g and g["rainfall_roll_90"].notna().any() else np.nan,
+        "other_market_last_price": g["other_market_last_price"].dropna().iloc[-1]
+            if "other_market_last_price" in g and g["other_market_last_price"].notna().any() else np.nan,
         "is_festival_window": festival_flag,
     }
 
@@ -188,6 +190,8 @@ def forecast_horizon(market, g, model, feature_cols, metrics, n_tenders=10):
         "temp_c": g["temp_c"].tail(30).mean() if "temp_c" in g else medians.get("temp_c", 0),
         "rainfall_roll_90": g["rainfall_roll_90"].dropna().iloc[-1]
             if "rainfall_roll_90" in g and g["rainfall_roll_90"].notna().any() else medians.get("rainfall_roll_90", 0),
+        "other_market_last_price": g["other_market_last_price"].dropna().iloc[-1]
+            if "other_market_last_price" in g and g["other_market_last_price"].notna().any() else medians.get("other_market_last_price", 0),
     }
 
     forecast_points = []
@@ -222,7 +226,8 @@ def forecast_horizon(market, g, model, feature_cols, metrics, n_tenders=10):
                 row[col] = medians.get(col, 0)
 
         X = pd.DataFrame([{c: row[c] for c in feature_cols}])
-        pred = float(model.predict(X)[0])
+        pred_log_return = float(model.predict(X)[0])
+        pred = lag1 * np.exp(pred_log_return)
 
         forecast_points.append({
             "date": target_date.strftime("%Y-%m-%d"),
@@ -259,7 +264,9 @@ def predict_market(market, df):
     target_date = next_tender_date(market, datetime.now())
 
     X_future, festival_name = build_future_row(g, feature_cols, target_date, metrics)
-    pred = float(model.predict(X_future)[0])
+    lag1_for_pred = g.sort_values("Date")["Modal"].iloc[-1]
+    pred_log_return = float(model.predict(X_future)[0])
+    pred = lag1_for_pred * np.exp(pred_log_return)
 
     recent = g.sort_values("Date").tail(60)[["Date", "Modal"]]
     history = [{"date": d.strftime("%Y-%m-%d"), "modal": float(m)} for d, m in
@@ -507,9 +514,9 @@ BOARD_CARD_TEMPLATE = """
   {festival_html}
   <div class="meta-row">
     <span>Model: {model_type}</span>
-    <span>Validation MAPE: {mape}</span>
+    <span>Walk-forward MAPE: {mape}</span>
   </div>
-  <div class="accuracy">Typical error: &plusmn; Rs {mae:,} / quintal (from backtest on held-out recent data)</div>
+  <div class="accuracy">Typical error: &plusmn; Rs {mae:,} / quintal (averaged across 5 walk-forward validation folds)</div>
 </div>
 """
 

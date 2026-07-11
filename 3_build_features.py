@@ -85,13 +85,43 @@ def add_price_features(df):
         g["modal_lag_1"] = g["Modal"].shift(1)
         g["modal_lag_2"] = g["Modal"].shift(2)
         g["modal_lag_3"] = g["Modal"].shift(3)
+        g["modal_lag_4"] = g["Modal"].shift(4)
+        g["modal_lag_5"] = g["Modal"].shift(5)
         g["modal_roll_mean_4"] = g["Modal"].shift(1).rolling(4, min_periods=1).mean()
         g["modal_roll_std_4"] = g["Modal"].shift(1).rolling(4, min_periods=2).std()
         g["modal_roll_mean_12"] = g["Modal"].shift(1).rolling(12, min_periods=1).mean()
+        g["modal_roll_median_8"] = g["Modal"].shift(1).rolling(8, min_periods=1).median()
+        # Mean-reversion signal: is the last price above/below its recent trend?
+        g["price_vs_trend_ratio"] = g["modal_lag_1"] / g["modal_roll_mean_12"]
+        # Irregular tender scheduling (holidays skip some days) - how long since
+        # the previous tender in THIS market actually was
+        g["gap_days"] = g["Date"].diff().dt.days
         g["price_momentum"] = g["modal_lag_1"] - g["modal_lag_2"]
         g["arrivals_lag_1"] = g["Arrivals"].shift(1)
         g["arrivals_roll_mean_4"] = g["Arrivals"].shift(1).rolling(4, min_periods=1).mean()
         out.append(g)
+    return pd.concat(out, ignore_index=True)
+
+
+def add_cross_market_features(df):
+    """
+    Tiptur and Arasikere are ~50km apart and trade the same commodity, so
+    the OTHER market's most recent price is a useful signal - e.g. if
+    Arasikere just jumped, Tiptur often follows within days. We use
+    merge_asof (point-in-time correct: only ever looks at the other
+    market's price as of a STRICTLY EARLIER date) so this can never leak
+    future information into training.
+    """
+    out = []
+    for market, g in df.groupby("Market"):
+        other = df[df["Market"] != market][["Date", "Modal"]].sort_values("Date")
+        other = other.rename(columns={"Modal": "other_market_last_price"})
+        g = g.sort_values("Date")
+        merged = pd.merge_asof(
+            g, other, on="Date", direction="backward",
+            allow_exact_matches=False,  # strictly before this row's date - no leakage
+        )
+        out.append(merged)
     return pd.concat(out, ignore_index=True)
 
 
@@ -160,6 +190,9 @@ def main():
 
     print("Adding price-history features (lags, rolling stats)...")
     df = add_price_features(prices)
+
+    print("Adding cross-market price feature...")
+    df = add_cross_market_features(df)
 
     print("Adding calendar/seasonality features...")
     df = add_calendar_features(df)
