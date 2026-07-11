@@ -1,0 +1,49 @@
+name: Send Tiptur SMS Forecast
+
+on:
+  schedule:
+    # 08:00 IST = 02:30 UTC, every Tuesday and Saturday
+    # (Tiptur tenders are Monday & Thursday, so this fires exactly 2 days before each)
+    - cron: "30 2 * * 2,6"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  send_sms:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run full pipeline (fresh data + model)
+        run: python run_all.py
+
+      - name: Send Kannada SMS forecast
+        env:
+          SMS_GATEWAY_USER: ${{ secrets.SMS_GATEWAY_USER }}
+          SMS_GATEWAY_PASS: ${{ secrets.SMS_GATEWAY_PASS }}
+          FATHER_PHONE_NUMBER: ${{ secrets.FATHER_PHONE_NUMBER }}
+        run: python 6_send_sms_forecast.py
+
+      - name: Copy dashboard for GitHub Pages
+        run: |
+          mkdir -p docs
+          cp dashboard.html docs/index.html
+
+      - name: Commit refreshed data + dashboard
+        run: |
+          git config user.name "copra-price-bot"
+          git config user.email "actions@github.com"
+          git add data/ dashboard.html docs/ 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "Auto-refresh (SMS run): $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
