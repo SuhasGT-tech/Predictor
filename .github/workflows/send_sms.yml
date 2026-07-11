@@ -37,6 +37,7 @@ jobs:
           SMS_GATEWAY_USER: ${{ secrets.SMS_GATEWAY_USER }}
           SMS_GATEWAY_PASS: ${{ secrets.SMS_GATEWAY_PASS }}
           FATHER_PHONE_NUMBER: ${{ secrets.FATHER_PHONE_NUMBER }}
+          EXTRA_PHONE_NUMBERS: ${{ secrets.EXTRA_PHONE_NUMBERS }}
         run: python 6_send_sms_forecast.py
 
       - name: Copy dashboard for GitHub Pages
