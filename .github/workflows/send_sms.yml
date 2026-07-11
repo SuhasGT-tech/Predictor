@@ -25,14 +25,19 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run full pipeline (fresh data + model)
-        run: python run_all.py
+      - name: Build features, train model, generate dashboard
+        run: |
+          python 2_fetch_external_factors.py
+          python 3_build_features.py
+          python 4_train_model.py
+          python 5_generate_dashboard.py
 
       - name: Send Kannada SMS forecast
         env:
           SMS_GATEWAY_USER: ${{ secrets.SMS_GATEWAY_USER }}
           SMS_GATEWAY_PASS: ${{ secrets.SMS_GATEWAY_PASS }}
           FATHER_PHONE_NUMBER: ${{ secrets.FATHER_PHONE_NUMBER }}
+          EXTRA_PHONE_NUMBERS: ${{ secrets.EXTRA_PHONE_NUMBERS }}
         run: python 6_send_sms_forecast.py
 
       - name: Copy dashboard for GitHub Pages

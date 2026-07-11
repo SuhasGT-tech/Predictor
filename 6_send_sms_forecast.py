@@ -31,6 +31,7 @@ automated schedule.
 """
 
 import os
+import re
 import json
 from datetime import datetime, timedelta
 
@@ -183,10 +184,14 @@ def compose_message(info):
 def send_sms(message):
     user = os.environ.get("SMS_GATEWAY_USER")
     password = os.environ.get("SMS_GATEWAY_PASS")
-    phone = os.environ.get("FATHER_PHONE_NUMBER")
+    father_phone = os.environ.get("FATHER_PHONE_NUMBER")
+    extra_phones = os.environ.get("EXTRA_PHONE_NUMBERS", "")  # comma-separated, e.g. your own number
 
-    if not (user and password and phone):
-        print("Missing SMS_GATEWAY_USER / SMS_GATEWAY_PASS / FATHER_PHONE_NUMBER "
+    extra_list = [p.strip() for p in re.split(r"[,\n\s]+", extra_phones) if p.strip()]
+    phones = [p.strip() for p in [father_phone] + extra_list if p and p.strip()]
+
+    if not (user and password and phones):
+        print("Missing SMS_GATEWAY_USER / SMS_GATEWAY_PASS / phone number "
               "environment variables - skipping actual send. Message would have been:")
         print(message)
         return
@@ -194,10 +199,10 @@ def send_sms(message):
     resp = requests.post(
         SMS_GATEWAY_URL,
         auth=(user, password),
-        json={"textMessage": {"text": message}, "phoneNumbers": [phone]},
+        json={"textMessage": {"text": message}, "phoneNumbers": phones},
         timeout=30,
     )
-    print(f"SMS gateway response: {resp.status_code} {resp.text}")
+    print(f"SMS gateway response: {resp.status_code} {resp.text} (sent to {phones})")
     resp.raise_for_status()
 
 
