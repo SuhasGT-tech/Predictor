@@ -87,7 +87,7 @@ FIELDNAMES = [
 # ----------------------------------------------------------------------
 
 def get_asp_tokens(session):
-    resp = session.get(BASE_URL, headers=HEADERS, timeout=30)
+    resp = session.get(BASE_URL, headers=HEADERS, timeout=60)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
