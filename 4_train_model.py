@@ -96,7 +96,7 @@ RF_CANDIDATES = [
 ]
 
 
-def pick_best_hyperparams(X, y, lag1):
+def pick_best_hyperparams(X, y_fit, y_eval, lag1):
     """
     Try each candidate config, score it with the same walk-forward CV used
     for final reporting, and keep whichever scored the lowest average MAPE.
@@ -107,7 +107,7 @@ def pick_best_hyperparams(X, y, lag1):
     best_params, best_mape, best_results = None, np.inf, None
 
     for params in candidates:
-        results = walk_forward_cv(X, y, lag1, params=params)
+        results = walk_forward_cv(X, y_fit, y_eval, lag1, params=params)
         avg_mape = float(np.mean([r["mape"] for r in results])) if results else np.inf
         print(f"    trying {params} -> avg MAPE {avg_mape:.1f}%")
         if avg_mape < best_mape:
@@ -116,11 +116,17 @@ def pick_best_hyperparams(X, y, lag1):
     return best_params, best_results
 
 
-def walk_forward_cv(X, y, lag1, n_folds=N_CV_FOLDS, min_train_frac=MIN_TRAIN_FRACTION, params=None):
+def walk_forward_cv(X, y_fit, y_eval, lag1, n_folds=N_CV_FOLDS, min_train_frac=MIN_TRAIN_FRACTION, params=None):
     """
     Expanding-window walk-forward validation. Returns list of per-fold
     (mae_price, mape_price) reconstructed in actual Rs terms, not log-return
     units, so the reported accuracy is directly interpretable.
+
+    y_fit is what the model is TRAINED on (winsorized, so a handful of
+    likely data-entry-error outliers don't distort what it learns).
+    y_eval is the TRUE, unclipped outcome, used only to score predictions -
+    so accuracy numbers reflect real-world performance, not a smoothed
+    target the model was never really tested against.
     """
     n = len(X)
     start = int(n * min_train_frac)
@@ -133,8 +139,8 @@ def walk_forward_cv(X, y, lag1, n_folds=N_CV_FOLDS, min_train_frac=MIN_TRAIN_FRA
         if train_end <= 10 or test_end <= train_end:
             continue
 
-        X_train, y_train = X.iloc[:train_end], y.iloc[:train_end]
-        X_test, y_test = X.iloc[train_end:test_end], y.iloc[train_end:test_end]
+        X_train, y_train = X.iloc[:train_end], y_fit.iloc[:train_end]
+        X_test, y_test_true = X.iloc[train_end:test_end], y_eval.iloc[train_end:test_end]
         lag1_test = lag1.iloc[train_end:test_end]
 
         model, _ = make_model(params)
@@ -142,7 +148,7 @@ def walk_forward_cv(X, y, lag1, n_folds=N_CV_FOLDS, min_train_frac=MIN_TRAIN_FRA
         pred_log_return = model.predict(X_test)
 
         pred_price = lag1_test.values * np.exp(pred_log_return)
-        actual_price = lag1_test.values * np.exp(y_test.values)
+        actual_price = lag1_test.values * np.exp(y_test_true.values)
 
         mae = float(np.mean(np.abs(pred_price - actual_price)))
         mape = float(np.mean(np.abs((pred_price - actual_price) / actual_price)) * 100)
@@ -160,13 +166,28 @@ def train_one_market(df, market):
     # have no defined target and are dropped.
     valid = g["modal_lag_1"].notna() & (g["modal_lag_1"] > 0) & g["Modal"].notna() & (g["Modal"] > 0)
     g = g[valid].reset_index(drop=True)
-    y = np.log(g["Modal"] / g["modal_lag_1"])
+    y_raw = np.log(g["Modal"] / g["modal_lag_1"])
     lag1 = g["modal_lag_1"]
+
+    # Winsorize extreme log-returns before training: a single day where the
+    # portal recorded (or later corrected) a wildly implausible price swing
+    # would otherwise dominate what the model learns, since squared-error-style
+    # loss functions weight big errors heavily. Clipping at the 1st/99th
+    # percentile keeps those rows in the data (so we don't lose real signal)
+    # while stopping them from distorting training. Evaluation below still
+    # compares against the true, unclipped outcome - only the training target
+    # is smoothed.
+    lo, hi = y_raw.quantile(0.01), y_raw.quantile(0.99)
+    n_clipped = int(((y_raw < lo) | (y_raw > hi)).sum())
+    y = y_raw.clip(lo, hi)
+    if n_clipped:
+        print(f"  Winsorized {n_clipped} extreme log-return outlier(s) "
+              f"(likely data-entry errors) before training")
 
     X = g[feature_cols].fillna(g[feature_cols].median(numeric_only=True))
 
     print(f"\n{market}: searching hyperparameters ({N_CV_FOLDS}-fold walk-forward CV each)...")
-    best_params, cv_results = pick_best_hyperparams(X, y, lag1)
+    best_params, cv_results = pick_best_hyperparams(X, y, y_raw, lag1)
     avg_mae = float(np.mean([r["mae"] for r in cv_results])) if cv_results else None
     avg_mape = float(np.mean([r["mape"] for r in cv_results])) if cv_results else None
 
@@ -178,14 +199,15 @@ def train_one_market(df, market):
         print(f"    fold {i+1}: MAE Rs {r['mae']:,.0f}, MAPE {r['mape']:.1f}% ({r['test_rows']} rows)")
 
     # Residual std (in log-return units) from the LAST fold's out-of-sample
-    # predictions - used later to build a rough +/- price range, since a
-    # single point estimate overstates how precise this really is
+    # predictions, scored against the TRUE (unclipped) outcome - used later
+    # to build a rough +/- price range, since a single point estimate
+    # overstates how precise this really is
     residual_std = None
     if cv_results:
         last_train_end = int(np.linspace(int(len(X) * MIN_TRAIN_FRACTION), len(X), N_CV_FOLDS + 1).astype(int)[-2])
         model, _ = make_model(best_params)
         model.fit(X.iloc[:last_train_end], y.iloc[:last_train_end])
-        resid = y.iloc[last_train_end:].values - model.predict(X.iloc[last_train_end:])
+        resid = y_raw.iloc[last_train_end:].values - model.predict(X.iloc[last_train_end:])
         if len(resid) > 1:
             residual_std = float(np.std(resid))
 

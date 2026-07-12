@@ -268,6 +268,16 @@ def predict_market(market, df):
     pred_log_return = float(model.predict(X_future)[0])
     pred = lag1_for_pred * np.exp(pred_log_return)
 
+    # Honest range: the model's residual spread (in log-return units, from
+    # walk-forward validation) translated into a +/- price band around the
+    # point estimate. A single number implies more precision than a ~2-5%
+    # typical error actually supports.
+    residual_std = metrics.get("residual_std_log_return")
+    range_low = range_high = None
+    if residual_std:
+        range_low = round(lag1_for_pred * np.exp(pred_log_return - residual_std))
+        range_high = round(lag1_for_pred * np.exp(pred_log_return + residual_std))
+
     recent = g.sort_values("Date").tail(60)[["Date", "Modal"]]
     history = [{"date": d.strftime("%Y-%m-%d"), "modal": float(m)} for d, m in
                zip(recent["Date"], recent["Modal"])]
@@ -283,6 +293,8 @@ def predict_market(market, df):
         "target_date": target_date.strftime("%Y-%m-%d"),
         "target_day_name": DAY_NAMES[target_date.weekday()],
         "prediction": round(pred),
+        "range_low": range_low,
+        "range_high": range_high,
         "last_actual": round(float(last_actual)),
         "last_date": last_date.strftime("%Y-%m-%d"),
         "change": round(pred - float(last_actual)),
@@ -375,6 +387,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .price-label { text-align: center; font-size: 12px; color: #a99a80; letter-spacing: 2px; margin-bottom: 2px; }
   .predicted-for { text-align: center; font-size: 13px; color: var(--copra-cream); margin-bottom: 16px; }
   .predicted-for b { color: var(--coir-gold); }
+  .range-note { text-align: center; font-size: 12px; color: #a99a80; margin-bottom: 10px; }
   .delta { text-align: center; font-size: 15px; margin-bottom: 6px; }
   .delta.up { color: var(--up-red); }
   .delta.down { color: var(--down-green); }
@@ -510,6 +523,7 @@ BOARD_CARD_TEMPLATE = """
   <div class="price-label">PREDICTED MODAL PRICE</div>
   <div class="flap">{digit_spans}</div>
   <div class="predicted-for">for <b>{target_day_name}, {target_date}</b></div>
+  <div class="range-note">{range_html}</div>
   <div class="delta {delta_class}">{delta_arrow} Rs {delta_abs:,} ({change_pct}%) vs last actual (Rs {last_actual:,} on {last_date})</div>
   {festival_html}
   <div class="meta-row">
@@ -548,11 +562,16 @@ def render_board_card(res):
     if res.get("festival_note"):
         festival_html = f"<div class='festival-note'>Festival demand window: {res['festival_note']}</div>"
 
+    range_html = ""
+    if res.get("range_low") and res.get("range_high"):
+        range_html = f"likely range: Rs {res['range_low']:,} &ndash; Rs {res['range_high']:,}"
+
     return BOARD_CARD_TEMPLATE.format(
         market=res["market"],
         target_day_name=res["target_day_name"],
         target_date=res["target_date"],
         digit_spans=digit_spans(res["prediction"]),
+        range_html=range_html,
         delta_class="up" if up else "down",
         delta_arrow="&#9650;" if up else "&#9660;",
         delta_abs=abs(res["change"]),

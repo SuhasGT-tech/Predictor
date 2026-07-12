@@ -150,12 +150,20 @@ def predict_next_tender():
     pred_log_return = float(model.predict(X)[0])
     pred = round(lag1 * np.exp(pred_log_return))
 
+    residual_std = metrics.get("residual_std_log_return")
+    range_low = range_high = None
+    if residual_std:
+        range_low = round(lag1 * np.exp(pred_log_return - residual_std))
+        range_high = round(lag1 * np.exp(pred_log_return + residual_std))
+
     best_month, best_pct = compute_best_month(g)
     best_month_kn = MONTH_NAMES_KN.get(best_month, "")
 
     return {
         "target_date": target_date,
         "prediction": pred,
+        "range_low": range_low,
+        "range_high": range_high,
         "festival_flag": festival_flag,
         "festival_name": festival_name,
         "best_month_kn": best_month_kn,
@@ -172,6 +180,8 @@ def compose_message(info):
         f"ಮುಂದಿನ ಟೆಂಡರ್: {day_kn}, {date_str}",
         f"ನಿರೀಕ್ಷಿತ ಬೆಲೆ: ಸುಮಾರು ರೂ. {info['prediction']:,}/ಕ್ವಿಂಟಲ್",
     ]
+    if info.get("range_low") and info.get("range_high"):
+        lines.append(f"ಸಾಧ್ಯತೆ ಇರುವ ವ್ಯಾಪ್ತಿ: ರೂ. {info['range_low']:,} - {info['range_high']:,}")
     if info["best_month_kn"]:
         lines.append(
             f"ಮಾರಾಟಕ್ಕೆ/ಸಂಗ್ರಹಕ್ಕೆ ಉತ್ತಮ ತಿಂಗಳು: {info['best_month_kn']} "
