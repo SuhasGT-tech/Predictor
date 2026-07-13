@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import joblib
+import model_utils  # noqa: F401 - required so joblib can unpickle SeedEnsembleRegressor models
 
 try:
     import holidays
@@ -35,11 +36,29 @@ FEATURES_CSV = os.path.join(DATA_DIR, "features.csv")
 OUT_HTML = os.path.join(BASE_DIR, "dashboard.html")
 
 # Tender days: Monday=0 ... Sunday=6
+# Populated dynamically in main() from actual recent data via detect_tender_days()
+# below - these are just fallback defaults if there's not enough recent data yet.
 TENDER_DAYS = {
     "TIPTUR": [0, 3],     # Mon, Thu
     "ARSIKERE": [1, 4],   # Tue, Fri
 }
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def detect_tender_days(dates, months_back=12, fallback=(0, 3)):
+    """
+    Detects the 2 weekdays this market actually traded on most often in the
+    last `months_back` months of real data, instead of trusting a fixed
+    assumption that could go stale if the real-world schedule ever shifts.
+    """
+    if len(dates) == 0:
+        return sorted(fallback)
+    cutoff = dates.max() - pd.DateOffset(months=months_back)
+    recent = dates[dates >= cutoff]
+    if len(recent) < 10:
+        return sorted(fallback)
+    top2 = recent.dt.dayofweek.value_counts().head(2).index.tolist()
+    return sorted(top2)
 
 
 def next_tender_date(market, from_date):
@@ -653,6 +672,15 @@ def main():
         return
 
     df = pd.read_csv(FEATURES_CSV, parse_dates=["Date"])
+
+    global TENDER_DAYS
+    TENDER_DAYS["TIPTUR"] = detect_tender_days(
+        df.loc[df["Market"] == "TIPTUR", "Date"], fallback=(0, 3))
+    TENDER_DAYS["ARSIKERE"] = detect_tender_days(
+        df.loc[df["Market"] == "ARSIKERE", "Date"], fallback=(1, 4))
+    print(f"Detected tender days (0=Mon...6=Sun) - TIPTUR: {TENDER_DAYS['TIPTUR']}, "
+          f"ARSIKERE: {TENDER_DAYS['ARSIKERE']}")
+
     results = []
     for market in ["TIPTUR", "ARSIKERE"]:
         if market in df["Market"].unique():

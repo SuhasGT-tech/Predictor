@@ -43,14 +43,9 @@ import os
 import json
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
 import joblib
 
-try:
-    from xgboost import XGBRegressor
-    HAS_XGB = True
-except ImportError:
-    HAS_XGB = False
+from model_utils import make_model, SeedEnsembleRegressor, HAS_XGB
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FEATURES_CSV = os.path.join(BASE_DIR, "data", "features.csv")
@@ -69,30 +64,26 @@ def get_feature_cols(df):
     return [c for c in df.columns if c not in DROP_COLS]
 
 
-def make_model(params=None):
-    params = params or {}
-    if HAS_XGB:
-        defaults = dict(n_estimators=400, max_depth=5, learning_rate=0.03,
-                        subsample=0.85, colsample_bytree=0.85, random_state=42)
-        defaults.update(params)
-        return XGBRegressor(**defaults), "XGBoost"
-    defaults = dict(n_estimators=400, max_depth=10, min_samples_leaf=3,
-                    random_state=42, n_jobs=-1)
-    defaults.update(params)
-    return RandomForestRegressor(**defaults), "RandomForest"
-
-
 # A handful of candidate configs to try per market - kept small so this stays
 # fast, but covers the main tradeoffs (tree depth/count vs. overfitting risk)
 XGB_CANDIDATES = [
     {"n_estimators": 400, "max_depth": 5, "learning_rate": 0.03},
     {"n_estimators": 600, "max_depth": 3, "learning_rate": 0.05},
     {"n_estimators": 300, "max_depth": 7, "learning_rate": 0.02},
+    # Regularized variants - test whether penalizing complexity helps
+    # generalization, given the model leans heavily on a handful of features
+    {"n_estimators": 400, "max_depth": 4, "learning_rate": 0.03,
+     "reg_alpha": 0.5, "reg_lambda": 2.0, "min_child_weight": 5},
+    {"n_estimators": 500, "max_depth": 5, "learning_rate": 0.02,
+     "reg_alpha": 1.0, "reg_lambda": 3.0, "min_child_weight": 8},
 ]
 RF_CANDIDATES = [
     {"n_estimators": 400, "max_depth": 10, "min_samples_leaf": 3},
     {"n_estimators": 600, "max_depth": 6, "min_samples_leaf": 5},
     {"n_estimators": 300, "max_depth": 14, "min_samples_leaf": 2},
+    # More regularized (higher min_samples_leaf = each leaf must average
+    # over more rows, a similar generalization-vs-complexity tradeoff)
+    {"n_estimators": 500, "max_depth": 5, "min_samples_leaf": 10},
 ]
 
 
@@ -124,7 +115,7 @@ def pick_best_hyperparams(X, y_fit, y_eval, lag1, weights=None):
 
 
 def walk_forward_cv(X, y_fit, y_eval, lag1, weights=None, n_folds=N_CV_FOLDS,
-                     min_train_frac=MIN_TRAIN_FRACTION, params=None):
+                     min_train_frac=MIN_TRAIN_FRACTION, params=None, n_seeds=1):
     """
     Expanding-window walk-forward validation. Returns list of per-fold
     (mae_price, mape_price) reconstructed in actual Rs terms, not log-return
@@ -155,7 +146,7 @@ def walk_forward_cv(X, y_fit, y_eval, lag1, weights=None, n_folds=N_CV_FOLDS,
         lag1_test = lag1.iloc[train_end:test_end]
         w_train = weights.iloc[:train_end].values if weights is not None else None
 
-        model, _ = make_model(params)
+        model, _ = make_model(params) if n_seeds <= 1 else (SeedEnsembleRegressor(params, n_seeds=n_seeds), None)
         model.fit(X_train, y_train, sample_weight=w_train)
         pred_log_return = model.predict(X_test)
 
@@ -222,6 +213,24 @@ def train_one_market(df, market):
 
     final_weights = recency_weights if use_weights else None
 
+    # Test whether bagging N differently-seeded copies of the chosen config
+    # and averaging their predictions beats a single model - a standard
+    # variance-reduction technique, but checked empirically here rather than
+    # assumed, using the same walk-forward setup for a fair comparison.
+    N_ENSEMBLE_SEEDS = 5
+    ensemble_results = walk_forward_cv(X, y, y_raw, lag1, weights=final_weights,
+                                        params=best_params, n_seeds=N_ENSEMBLE_SEEDS)
+    ensemble_mape = float(np.mean([r["mape"] for r in ensemble_results])) if ensemble_results else np.inf
+    use_ensemble = ensemble_mape < avg_mape
+    print(f"  Single model MAPE: {avg_mape:.1f}% vs {N_ENSEMBLE_SEEDS}-seed ensemble MAPE: "
+          f"{ensemble_mape:.1f}% -> using {'ensemble' if use_ensemble else 'single model'}")
+    if use_ensemble:
+        cv_results = ensemble_results
+        avg_mae = float(np.mean([r["mae"] for r in cv_results]))
+        avg_mape = ensemble_mape
+
+    n_seeds_final = N_ENSEMBLE_SEEDS if use_ensemble else 1
+
     # Residual std (in log-return units) from the LAST fold's out-of-sample
     # predictions, scored against the TRUE (unclipped) outcome - used later
     # to build a rough +/- price range, since a single point estimate
@@ -229,7 +238,7 @@ def train_one_market(df, market):
     residual_std = None
     if cv_results:
         last_train_end = int(np.linspace(int(len(X) * MIN_TRAIN_FRACTION), len(X), N_CV_FOLDS + 1).astype(int)[-2])
-        model, _ = make_model(best_params)
+        model = SeedEnsembleRegressor(best_params, n_seeds=n_seeds_final) if use_ensemble else make_model(best_params)[0]
         w_fit = final_weights.iloc[:last_train_end].values if final_weights is not None else None
         model.fit(X.iloc[:last_train_end], y.iloc[:last_train_end], sample_weight=w_fit)
         resid = y_raw.iloc[last_train_end:].values - model.predict(X.iloc[last_train_end:])
@@ -238,7 +247,7 @@ def train_one_market(df, market):
 
     # Final model: refit on ALL available data for deployment, now that
     # we've measured honest out-of-sample accuracy above
-    final_model, _ = make_model(best_params)
+    final_model = SeedEnsembleRegressor(best_params, n_seeds=n_seeds_final) if use_ensemble else make_model(best_params)[0]
     final_model.fit(X, y, sample_weight=final_weights.values if final_weights is not None else None)
 
     importances = getattr(final_model, "feature_importances_", None)
@@ -260,6 +269,8 @@ def train_one_market(df, market):
             "target": "log_return",
             "hyperparameters": best_params,
             "recency_weighted": use_weights,
+            "seed_ensembled": use_ensemble,
+            "n_seeds": n_seeds_final,
             "mae": avg_mae,
             "mape": avg_mape,
             "residual_std_log_return": residual_std,
