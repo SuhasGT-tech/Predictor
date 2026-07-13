@@ -5,15 +5,20 @@ them all to data/external_factors.csv (one row per calendar day, from
 
 FACTORS FETCHED
 ---------------
-1. Global coconut oil price (USD/metric ton) - World Bank "Pink Sheet"
-   monthly commodity data. Forward-filled to daily resolution.
+1. Global edible oil prices (USD/metric ton) - World Bank "Pink Sheet"
+   monthly commodity data, forward-filled to daily resolution:
+     - Coconut oil (the direct reference price)
+     - Palm oil, Soybean oil (competing edible oils - coconut oil buyers
+       can substitute toward these, so their relative prices matter, not
+       just coconut oil's price level in isolation)
 2. USD/INR exchange rate (daily) - Frankfurter API (ECB-sourced, free,
    no key). A weaker rupee makes Indian copra/coconut-oil exports more
    competitive, which can support domestic prices.
 3. Weather (daily rainfall + mean temperature) for Hassan district
    (Arasikere market) and Tumakuru district (Tiptur market) - Open-Meteo
-   historical archive API, free, no key. Rainfall affects coconut yield
-   with a lag of several months.
+   historical archive API, free, no key. A 12-month-lagged rainfall
+   feature is also derived in 3_build_features.py, matching the coconut
+   palm's roughly year-long flowering-to-harvest cycle.
 4. Festival calendar - India's major holidays (Diwali, Ganesh Chaturthi,
    Onam, Navratri, etc. push up coconut/coconut-oil demand for cooking,
    offerings, and hair-oil use). Uses the `holidays` python package, then
@@ -97,8 +102,17 @@ def find_worldbank_xlsx_url():
     return WORLDBANK_XLSX_FALLBACK
 
 
-def fetch_coconut_oil_prices():
-    print("Fetching global coconut oil prices (World Bank Pink Sheet)...")
+def fetch_commodity_prices():
+    """
+    Pulls coconut oil AND two competing edible oils (palm oil, soybean oil)
+    from the same World Bank sheet. These aren't just "more data" - coconut
+    oil, palm oil, and soybean oil are substitutable in most of their uses
+    (cooking, industrial), so buyers switch between them based on relative
+    price. A coconut-oil-only view misses that a copra price move might
+    really be "palm oil got expensive so buyers shifted to coconut oil,"
+    not something intrinsic to coconut supply/demand at all.
+    """
+    print("Fetching global edible oil prices (World Bank Pink Sheet)...")
     url = find_worldbank_xlsx_url()
     print(f"  Using: {url}")
     resp = requests.get(url, headers=HEADERS, timeout=60)
@@ -110,29 +124,41 @@ def fetch_coconut_oil_prices():
     sheet_name = "Monthly Prices" if "Monthly Prices" in xl.sheet_names else xl.sheet_names[0]
     raw = xl.parse(sheet_name, header=None)
 
-    # Find the header row (contains "Coconut oil")
+    # Find the header row (contains "Coconut oil") and column indices for
+    # each commodity we want, all read off that same header row
     header_row_idx = None
-    coconut_col_idx = None
+    col_indices = {}
+    targets = {
+        "coconut_oil_price_usd_per_mt": "coconut oil",
+        "palm_oil_price_usd_per_mt": "palm oil",
+        "soybean_oil_price_usd_per_mt": "soybean oil",
+    }
     for i, row in raw.iterrows():
         for j, val in enumerate(row):
-            if isinstance(val, str) and "coconut oil" in val.lower():
-                header_row_idx = i
-                coconut_col_idx = j
-                break
-        if header_row_idx is not None:
+            if not isinstance(val, str):
+                continue
+            val_lower = val.lower()
+            for col_name, keyword in targets.items():
+                if keyword in val_lower and col_name not in col_indices:
+                    col_indices[col_name] = j
+        if "coconut_oil_price_usd_per_mt" in col_indices:
+            header_row_idx = i
             break
 
-    if header_row_idx is None:
+    if header_row_idx is None or "coconut_oil_price_usd_per_mt" not in col_indices:
         raise RuntimeError(
             "Could not find a 'Coconut oil' column in the World Bank sheet - "
             "the file layout may have changed. Open the xlsx manually to check."
         )
+    missing = [k for k in targets if k not in col_indices]
+    if missing:
+        print(f"  NOTE: couldn't find columns for {missing} - continuing without them")
 
-    # Data starts a couple of rows below the header; first column is the
-    # period label like "2002M01"
-    data = raw.iloc[header_row_idx + 1:, [0, coconut_col_idx]].copy()
-    data.columns = ["period", "coconut_oil_price_usd_per_mt"]
-    data = data.dropna()
+    cols = [0] + list(col_indices.values())
+    names = ["period"] + list(col_indices.keys())
+    data = raw.iloc[header_row_idx + 1:, cols].copy()
+    data.columns = names
+    data = data.dropna(subset=["period"])
 
     def parse_period(p):
         p = str(p).strip()
@@ -143,12 +169,13 @@ def fetch_coconut_oil_prices():
 
     data["month"] = data["period"].apply(parse_period)
     data = data.dropna(subset=["month"])
-    data["coconut_oil_price_usd_per_mt"] = pd.to_numeric(
-        data["coconut_oil_price_usd_per_mt"], errors="coerce"
-    )
-    data = data[["month", "coconut_oil_price_usd_per_mt"]].sort_values("month")
-    print(f"  Got {len(data)} months of coconut oil price data "
-          f"({data['month'].min().date()} to {data['month'].max().date()})")
+    price_cols = [c for c in data.columns if c not in ("period", "month")]
+    for col in price_cols:
+        data[col] = pd.to_numeric(data[col], errors="coerce")
+    data = data[["month"] + price_cols].sort_values("month")
+    print(f"  Got {len(data)} months of edible oil price data "
+          f"({data['month'].min().date()} to {data['month'].max().date()}), "
+          f"columns: {price_cols}")
     return data
 
 
@@ -240,21 +267,26 @@ def main():
 
     daily = pd.DataFrame({"date": pd.date_range(START_DATE, END_DATE, freq="D")})
 
-    # Coconut oil (monthly -> forward-fill to daily)
+    # Edible oil prices (monthly -> forward-fill to daily): coconut oil plus
+    # competing oils (palm, soybean) that copra buyers can substitute toward
+    oil_cols = ["coconut_oil_price_usd_per_mt", "palm_oil_price_usd_per_mt",
+                "soybean_oil_price_usd_per_mt"]
     try:
-        oil = fetch_coconut_oil_prices()
+        oil = fetch_commodity_prices()
         oil_daily = daily.merge(
             oil.rename(columns={"month": "date"}), on="date", how="left"
         )
-        oil_daily["coconut_oil_price_usd_per_mt"] = oil_daily[
-            "coconut_oil_price_usd_per_mt"
-        ].ffill()
-        daily = daily.merge(
-            oil_daily[["date", "coconut_oil_price_usd_per_mt"]], on="date", how="left"
-        )
+        present_cols = [c for c in oil_cols if c in oil_daily.columns]
+        for col in present_cols:
+            oil_daily[col] = oil_daily[col].ffill()
+        daily = daily.merge(oil_daily[["date"] + present_cols], on="date", how="left")
+        for col in oil_cols:
+            if col not in daily.columns:
+                daily[col] = None
     except Exception as e:
-        print(f"  !! Coconut oil price fetch failed: {e}")
-        daily["coconut_oil_price_usd_per_mt"] = None
+        print(f"  !! Edible oil price fetch failed: {e}")
+        for col in oil_cols:
+            daily[col] = None
 
     # USD/INR
     try:

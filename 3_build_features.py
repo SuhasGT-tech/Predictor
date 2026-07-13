@@ -125,13 +125,39 @@ def add_cross_market_features(df):
     return pd.concat(out, ignore_index=True)
 
 
+def detect_tender_days(dates, months_back=12, fallback=(0, 3)):
+    """
+    Returns the 2 weekdays (0=Mon..6=Sun) this market ACTUALLY traded on most
+    often in the last `months_back` months of real data - instead of
+    assuming a fixed schedule forever. Government tender schedules do shift
+    (holidays, market committee changes, etc.), so this re-detects the
+    pattern from whatever the latest data actually shows every time the
+    pipeline runs, rather than baking in one assumption permanently.
+    """
+    if len(dates) == 0:
+        return sorted(fallback)
+    cutoff = dates.max() - pd.DateOffset(months=months_back)
+    recent = dates[dates >= cutoff]
+    if len(recent) < 10:
+        return sorted(fallback)
+    top2 = recent.dt.dayofweek.value_counts().head(2).index.tolist()
+    return sorted(top2)
+
+
 def add_calendar_features(df):
     df["day_of_week"] = df["Date"].dt.dayofweek  # Mon=0 ... Sun=6
     df["month"] = df["Date"].dt.month
     df["year"] = df["Date"].dt.year
     df["days_since_start"] = (df["Date"] - df["Date"].min()).dt.days
-    df["is_tiptur_tenderday"] = df["day_of_week"].isin([0, 3]).astype(int)   # Mon, Thu
-    df["is_arsikere_tenderday"] = df["day_of_week"].isin([1, 4]).astype(int)  # Tue, Fri
+
+    tiptur_days = detect_tender_days(df.loc[df["Market"] == "TIPTUR", "Date"], fallback=(0, 3))
+    arsikere_days = detect_tender_days(df.loc[df["Market"] == "ARSIKERE", "Date"], fallback=(1, 4))
+    print(f"  Detected TIPTUR tender days (last 12mo): {tiptur_days} "
+          f"(0=Mon...6=Sun)")
+    print(f"  Detected ARSIKERE tender days (last 12mo): {arsikere_days}")
+
+    df["is_tiptur_tenderday"] = df["day_of_week"].isin(tiptur_days).astype(int)
+    df["is_arsikere_tenderday"] = df["day_of_week"].isin(arsikere_days).astype(int)
     return df
 
 
@@ -139,9 +165,10 @@ def add_external_features(df):
     if not os.path.exists(EXTERNAL_CSV):
         print(f"  NOTE: {EXTERNAL_CSV} not found yet - run 2_fetch_external_factors.py "
               "first for full accuracy. Continuing with price/calendar features only.")
-        for col in ["coconut_oil_price_usd_per_mt", "usd_inr_rate", "rainfall_mm",
-                    "temp_c", "is_festival_window", "rainfall_roll_90",
-                    "coconut_oil_price_change_1m"]:
+        for col in ["coconut_oil_price_usd_per_mt", "palm_oil_price_usd_per_mt",
+                    "soybean_oil_price_usd_per_mt", "coconut_vs_palm_oil_ratio",
+                    "usd_inr_rate", "rainfall_mm", "temp_c", "is_festival_window",
+                    "rainfall_roll_90", "rainfall_lag_12mo", "coconut_oil_price_change_1m"]:
             df[col] = np.nan
         return df
 
@@ -166,15 +193,44 @@ def add_external_features(df):
         .transform(lambda s: s.rolling(90, min_periods=1).mean())
     )
 
+    # Rainfall from ~12 months ago: coconut palms take roughly a year from
+    # flowering to nut maturity/harvest, so TODAY's rainfall barely affects
+    # TODAY's copra supply - rainfall from a year ago is the biologically
+    # relevant lead indicator for how much is available to sell right now.
+    rain_lookup = ext.set_index("date")
+
+    def lagged_rainfall(row):
+        col = f"rainfall_{row['Market'].lower()}_mm"
+        target_date = row["Date"] - pd.DateOffset(months=12)
+        # nearest available daily reading within a few days of the target
+        window = rain_lookup.loc[target_date - pd.Timedelta(days=5):
+                                  target_date + pd.Timedelta(days=5), col] \
+            if col in rain_lookup.columns else pd.Series(dtype=float)
+        return window.mean() if len(window) else np.nan
+
+    df["rainfall_lag_12mo"] = df.apply(lagged_rainfall, axis=1)
+
     df["coconut_oil_price_change_1m"] = (
         df.sort_values("Date").groupby("Market")["coconut_oil_price_usd_per_mt"]
         .transform(lambda s: s.diff(1))
     )
 
+    # Substitution signal: coconut oil price relative to a competing oil.
+    # A rising ratio means coconut oil is getting relatively MORE expensive
+    # than its substitutes - which can soften copra demand even if coconut
+    # oil's own price level looks stable, because buyers can switch away.
+    if "palm_oil_price_usd_per_mt" in df.columns:
+        df["coconut_vs_palm_oil_ratio"] = (
+            df["coconut_oil_price_usd_per_mt"] / df["palm_oil_price_usd_per_mt"]
+        )
+    else:
+        df["coconut_vs_palm_oil_ratio"] = np.nan
+
     keep_ext_cols = [
-        "coconut_oil_price_usd_per_mt", "coconut_oil_price_change_1m",
-        "usd_inr_rate", "rainfall_mm", "temp_c", "rainfall_roll_90",
-        "is_festival_window",
+        "coconut_oil_price_usd_per_mt", "palm_oil_price_usd_per_mt",
+        "soybean_oil_price_usd_per_mt", "coconut_vs_palm_oil_ratio",
+        "coconut_oil_price_change_1m", "usd_inr_rate", "rainfall_mm", "temp_c",
+        "rainfall_roll_90", "rainfall_lag_12mo", "is_festival_window",
     ]
     drop_cols = [c for c in df.columns if c.startswith(("rainfall_ar", "rainfall_ti",
                                                           "temp_ar", "temp_ti", "nearest_festival"))
