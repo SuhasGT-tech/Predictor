@@ -96,27 +96,35 @@ RF_CANDIDATES = [
 ]
 
 
-def pick_best_hyperparams(X, y_fit, y_eval, lag1):
+def pick_best_hyperparams(X, y_fit, y_eval, lag1, weights=None):
     """
     Try each candidate config, score it with the same walk-forward CV used
     for final reporting, and keep whichever scored the lowest average MAPE.
     This replaces guessing hyperparameters up front with actually testing
     a few reasonable options against your specific data.
+
+    Also tests WITH and WITHOUT recency weighting for each config, since
+    whether older data is still representative of current market conditions
+    is itself an empirical question, not something to assume either way.
     """
     candidates = XGB_CANDIDATES if HAS_XGB else RF_CANDIDATES
-    best_params, best_mape, best_results = None, np.inf, None
+    best_params, best_mape, best_results, best_use_weights = None, np.inf, None, False
 
     for params in candidates:
-        results = walk_forward_cv(X, y_fit, y_eval, lag1, params=params)
-        avg_mape = float(np.mean([r["mape"] for r in results])) if results else np.inf
-        print(f"    trying {params} -> avg MAPE {avg_mape:.1f}%")
-        if avg_mape < best_mape:
-            best_params, best_mape, best_results = params, avg_mape, results
+        for use_weights, label in [(False, "no recency weighting"), (True, "recency-weighted")]:
+            w = weights if use_weights else None
+            results = walk_forward_cv(X, y_fit, y_eval, lag1, weights=w, params=params)
+            avg_mape = float(np.mean([r["mape"] for r in results])) if results else np.inf
+            print(f"    trying {params} ({label}) -> avg MAPE {avg_mape:.1f}%")
+            if avg_mape < best_mape:
+                best_params, best_mape, best_results, best_use_weights = params, avg_mape, results, use_weights
 
-    return best_params, best_results
+    print(f"  -> best used {'recency weighting' if best_use_weights else 'no recency weighting'}")
+    return best_params, best_results, best_use_weights
 
 
-def walk_forward_cv(X, y_fit, y_eval, lag1, n_folds=N_CV_FOLDS, min_train_frac=MIN_TRAIN_FRACTION, params=None):
+def walk_forward_cv(X, y_fit, y_eval, lag1, weights=None, n_folds=N_CV_FOLDS,
+                     min_train_frac=MIN_TRAIN_FRACTION, params=None):
     """
     Expanding-window walk-forward validation. Returns list of per-fold
     (mae_price, mape_price) reconstructed in actual Rs terms, not log-return
@@ -127,6 +135,9 @@ def walk_forward_cv(X, y_fit, y_eval, lag1, n_folds=N_CV_FOLDS, min_train_frac=M
     y_eval is the TRUE, unclipped outcome, used only to score predictions -
     so accuracy numbers reflect real-world performance, not a smoothed
     target the model was never really tested against.
+
+    weights (optional): per-row sample weights (e.g. recency weighting -
+    more recent tenders count more than very old ones during training).
     """
     n = len(X)
     start = int(n * min_train_frac)
@@ -142,9 +153,10 @@ def walk_forward_cv(X, y_fit, y_eval, lag1, n_folds=N_CV_FOLDS, min_train_frac=M
         X_train, y_train = X.iloc[:train_end], y_fit.iloc[:train_end]
         X_test, y_test_true = X.iloc[train_end:test_end], y_eval.iloc[train_end:test_end]
         lag1_test = lag1.iloc[train_end:test_end]
+        w_train = weights.iloc[:train_end].values if weights is not None else None
 
         model, _ = make_model(params)
-        model.fit(X_train, y_train)
+        model.fit(X_train, y_train, sample_weight=w_train)
         pred_log_return = model.predict(X_test)
 
         pred_price = lag1_test.values * np.exp(pred_log_return)
@@ -186,17 +198,29 @@ def train_one_market(df, market):
 
     X = g[feature_cols].fillna(g[feature_cols].median(numeric_only=True))
 
+    # Recency weights: older tenders count less than recent ones, since a
+    # 24-year-old market regime may not reflect current dynamics. Half-life
+    # of 4 years means data from 4 years ago carries half the weight of
+    # today's; 8 years ago, a quarter; etc. Whether this actually helps is
+    # tested empirically below (alongside hyperparameters), not assumed.
+    age_years = (g["Date"].max() - g["Date"]).dt.days / 365.25
+    HALF_LIFE_YEARS = 4.0
+    recency_weights = 0.5 ** (age_years / HALF_LIFE_YEARS)
+
     print(f"\n{market}: searching hyperparameters ({N_CV_FOLDS}-fold walk-forward CV each)...")
-    best_params, cv_results = pick_best_hyperparams(X, y, y_raw, lag1)
+    best_params, cv_results, use_weights = pick_best_hyperparams(
+        X, y, y_raw, lag1, weights=recency_weights)
     avg_mae = float(np.mean([r["mae"] for r in cv_results])) if cv_results else None
     avg_mape = float(np.mean([r["mape"] for r in cv_results])) if cv_results else None
 
     model_type = "XGBoost" if HAS_XGB else "RandomForest"
-    print(f"  Best config: {best_params}")
+    print(f"  Best config: {best_params} (recency weighting: {use_weights})")
     print(f"  Walk-forward avg over {len(cv_results)} folds: "
           f"MAE Rs {avg_mae:,.0f}, MAPE {avg_mape:.1f}%")
     for i, r in enumerate(cv_results):
         print(f"    fold {i+1}: MAE Rs {r['mae']:,.0f}, MAPE {r['mape']:.1f}% ({r['test_rows']} rows)")
+
+    final_weights = recency_weights if use_weights else None
 
     # Residual std (in log-return units) from the LAST fold's out-of-sample
     # predictions, scored against the TRUE (unclipped) outcome - used later
@@ -206,7 +230,8 @@ def train_one_market(df, market):
     if cv_results:
         last_train_end = int(np.linspace(int(len(X) * MIN_TRAIN_FRACTION), len(X), N_CV_FOLDS + 1).astype(int)[-2])
         model, _ = make_model(best_params)
-        model.fit(X.iloc[:last_train_end], y.iloc[:last_train_end])
+        w_fit = final_weights.iloc[:last_train_end].values if final_weights is not None else None
+        model.fit(X.iloc[:last_train_end], y.iloc[:last_train_end], sample_weight=w_fit)
         resid = y_raw.iloc[last_train_end:].values - model.predict(X.iloc[last_train_end:])
         if len(resid) > 1:
             residual_std = float(np.std(resid))
@@ -214,7 +239,7 @@ def train_one_market(df, market):
     # Final model: refit on ALL available data for deployment, now that
     # we've measured honest out-of-sample accuracy above
     final_model, _ = make_model(best_params)
-    final_model.fit(X, y)
+    final_model.fit(X, y, sample_weight=final_weights.values if final_weights is not None else None)
 
     importances = getattr(final_model, "feature_importances_", None)
     top_features = []
@@ -234,6 +259,7 @@ def train_one_market(df, market):
             "model_type": model_type,
             "target": "log_return",
             "hyperparameters": best_params,
+            "recency_weighted": use_weights,
             "mae": avg_mae,
             "mape": avg_mape,
             "residual_std_log_return": residual_std,
