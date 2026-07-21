@@ -627,7 +627,6 @@ def render_outlook_card(res):
         )
         if len(seen_festivals) >= 3:
             break
-        )
 
     if not items:
         items.append("<div class='outlook-item'><span>Not enough history yet to build an outlook.</span></div>")
