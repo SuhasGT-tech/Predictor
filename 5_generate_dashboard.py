@@ -615,11 +615,18 @@ def render_outlook_card(res):
             f"treat this as a rough trend, not a locked-in price.</span></div>"
         )
 
-    for hit in (res.get("festival_hits") or [])[:3]:
+    seen_festivals = set()
+    for hit in (res.get("festival_hits") or []):
+        if hit["name"] in seen_festivals:
+            continue
+        seen_festivals.add(hit["name"])
         items.append(
             f"<div class='outlook-item upcoming-festival'><span class='outlook-icon'>&#127881;</span>"
             f"<span><b>{hit['name']}</b> falls around {hit['date']} — festival demand windows have "
             f"historically coincided with firmer coconut/copra prices.</span></div>"
+        )
+        if len(seen_festivals) >= 3:
+            break
         )
 
     if not items:
