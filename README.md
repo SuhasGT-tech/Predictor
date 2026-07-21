@@ -98,6 +98,32 @@ Library → right-click **CopraPricePredictor** → Properties → Triggers tab.
 | `3_build_features.py` | Combines everything into model-ready features → `data/features.csv` |
 | `4_train_model.py` | Trains one model per market, saves to `models/` |
 | `5_generate_dashboard.py` | Predicts the next tender price, builds `dashboard.html` |
+| `6_send_sms_forecast.py` | Sends the Tiptur-only Kannada SMS forecast (run separately, see below) |
+
+## Model improvements (v2)
+
+Three changes made a real difference, in order of impact:
+
+1. **Predicting price change, not price level.** Tree models (XGBoost/
+   RandomForest) can't output a number outside the range they were trained
+   on - so a model trained directly on "Modal price" is quietly capped
+   near the highest price it's ever seen, even as real prices keep
+   climbing. Now the model predicts the **log-return** (how much the price
+   moves from the last known tender), and we reconstruct the actual price
+   as `last_price * exp(predicted_return)`. This lets predictions extend
+   past any price level seen in the 24-year history. This was the single
+   biggest accuracy gain: Arasikere's error dropped from ~19% to ~6%,
+   Tiptur's from ~7% to ~2%.
+2. **Cross-market feature.** Tiptur and Arasikere are ~50km apart and
+   trade the same commodity, so each market's most recent price now feeds
+   into the other's model as a feature (`other_market_last_price`) -
+   using a strictly-past-only join so there's no lookahead leakage.
+3. **Walk-forward cross-validation.** Instead of one train/test split at
+   the end of history (which gives a single noisy accuracy estimate),
+   `4_train_model.py` now runs 5 expanding-window folds and reports the
+   average - a more honest picture of real-world accuracy, since it's not
+   dependent on whether the last few months happened to be unusually calm
+   or volatile.
 
 ## How the ML actually works (the short version)
 
@@ -132,22 +158,84 @@ multiple grades (FAQ etc.) per market per day sometimes. We collapse these
 to one arrivals-weighted price per market/day so "price" means one
 consistent thing.
 
-## Current accuracy (from the last training run)
+## Model improvements (log-return target + walk-forward CV + auto-tuning)
 
-Check `models/metrics_tiptur.json` and `models/metrics_arsikere.json` after
-each run — they contain MAE (average error in Rs) and MAPE (average error
-in %). On the initial backtest with this data:
+The model has gone through several rounds of real improvement, each
+verified against your actual 24-year price history rather than assumed:
 
-- Tiptur: ~7% typical error
-- Arasikere: ~18% typical error (Arasikere's data has more volatility/gaps
-  historically — as you accumulate more recent data this should improve)
+**1. Predicting price CHANGE, not price LEVEL.** Tree-based models
+(XGBoost/RandomForest) predict by averaging training examples — they
+physically cannot output a number above the highest price ever seen in
+training. Since copra prices have climbed for 24 years (~Rs 3,000 in 2002
+to Rs 31,000+ now), a model trained on raw price was quietly capped near
+its training ceiling. Fix: predict `log(next_price / last_price)` instead
+— a small, stable ratio regardless of the price level — then reconstruct
+`predicted_price = last_price × exp(predicted_ratio)`. This lets the
+model extrapolate beyond prices it's ever seen, because it's the *ratio*
+being predicted, not the absolute number.
 
-These will change (hopefully improve) once `xgboost` is installed (falls
-back to RandomForest otherwise) and once `2_fetch_external_factors.py` has
-pulled real weather/oil-price/fx data rather than running on price history
-alone.
+**2. Walk-forward cross-validation instead of one train/test split.**
+A single holdout at the end of history gives one noisy accuracy estimate.
+Walk-forward CV trains on an expanding window and tests on 5 different
+subsequent chunks in turn (always past → future, never shuffled), giving
+a more honest average.
 
-## Where "other factors" live, and how to add more
+**3. More/better features:** additional lags (up to 5 tenders back), a
+mean-reversion signal (`price_vs_trend_ratio` — is the price stretched
+above/below its recent trend?), the actual gap in days since the previous
+tender (tenders aren't perfectly regular — holidays skip some), and a
+cross-market feature (Tiptur and Arasikere are ~50km apart and trade the
+same commodity, so one market's latest price is a real signal for the
+other — computed leak-free with `merge_asof`, only ever looking backward).
+
+**4. Automatic hyperparameter selection.** Instead of one guessed XGBoost
+configuration, `4_train_model.py` now tries 3 candidate configs per
+market and keeps whichever scored best on walk-forward CV — an honest,
+data-driven choice instead of a guess.
+
+**Result:** Tiptur improved from ~7% typical error to ~2%, Arasikere from
+~18% to ~5% (numbers from a real run on your data — check
+`models/metrics_tiptur.json` / `models/metrics_arsikere.json` after each
+retrain for the current numbers, which will drift over time as more data
+comes in).
+
+## SMS forecast to your father (Kannada, Tiptur only, 2 days before each tender)
+
+Since he uses a keypad phone, this sends a plain SMS (not an app/internet
+notification) 2 days before each Tiptur tender (Saturday for Monday's
+tender, Tuesday for Thursday's tender), with:
+- the predicted price for that tender
+- which month has historically been the best one to hold/sell in
+
+**Why this doesn't need India's DLT/bulk-SMS registration:** the message is
+sent from an ordinary Android phone's own SIM, via the free open-source
+[SMS Gateway for Android](https://github.com/capcom6/android-sms-gateway)
+app — technically identical to you typing and sending the text yourself.
+DLT rules target commercial/bulk senders, not a personal message from your
+own number.
+
+**One-time setup:**
+1. Install the app on any Android phone you have access to (doesn't need
+   to be your daily phone — just needs battery + signal on Tuesday/Saturday
+   mornings): download the APK from the
+   [releases page](https://github.com/capcom6/android-sms-gateway/releases).
+2. Open the app → toggle **Cloud Server** → tap **Online**. It'll display a
+   username and password — keep the app installed and don't clear its data.
+3. In your GitHub repo: **Settings → Secrets and variables → Actions →
+   New repository secret**, add three secrets:
+   - `SMS_GATEWAY_USER` — the username from step 2
+   - `SMS_GATEWAY_PASS` — the password from step 2
+   - `FATHER_PHONE_NUMBER` — his number with country code, e.g. `+919xxxxxxxxx`
+4. That's it — `.github/workflows/send_sms.yml` runs every Tuesday and
+   Saturday at 8:00 AM IST automatically.
+
+**Test it manually first:** Actions tab → "Send Tiptur SMS Forecast" →
+"Run workflow" → check your father's phone within a minute or two.
+
+**Editing the message:** `6_send_sms_forecast.py` builds the text in
+`compose_message()` — edit the Kannada wording there directly if you want
+to change phrasing (I've written it in plain, simple Kannada, but you know
+your father's phrasing preferences better than I do — feel free to adjust).
 
 Currently included: global coconut oil price, USD/INR rate, Hassan/Tumakuru
 rainfall & temperature, India festival calendar (via the `holidays` package).

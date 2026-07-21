@@ -22,7 +22,6 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import joblib
-import model_utils  # noqa: F401 - required so joblib can unpickle SeedEnsembleRegressor models
 
 try:
     import holidays
@@ -36,29 +35,11 @@ FEATURES_CSV = os.path.join(DATA_DIR, "features.csv")
 OUT_HTML = os.path.join(BASE_DIR, "dashboard.html")
 
 # Tender days: Monday=0 ... Sunday=6
-# Populated dynamically in main() from actual recent data via detect_tender_days()
-# below - these are just fallback defaults if there's not enough recent data yet.
 TENDER_DAYS = {
     "TIPTUR": [0, 3],     # Mon, Thu
     "ARSIKERE": [1, 4],   # Tue, Fri
 }
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-
-
-def detect_tender_days(dates, months_back=12, fallback=(0, 3)):
-    """
-    Detects the 2 weekdays this market actually traded on most often in the
-    last `months_back` months of real data, instead of trusting a fixed
-    assumption that could go stale if the real-world schedule ever shifts.
-    """
-    if len(dates) == 0:
-        return sorted(fallback)
-    cutoff = dates.max() - pd.DateOffset(months=months_back)
-    recent = dates[dates >= cutoff]
-    if len(recent) < 10:
-        return sorted(fallback)
-    top2 = recent.dt.dayofweek.value_counts().head(2).index.tolist()
-    return sorted(top2)
 
 
 def next_tender_date(market, from_date):
@@ -287,16 +268,6 @@ def predict_market(market, df):
     pred_log_return = float(model.predict(X_future)[0])
     pred = lag1_for_pred * np.exp(pred_log_return)
 
-    # Honest range: the model's residual spread (in log-return units, from
-    # walk-forward validation) translated into a +/- price band around the
-    # point estimate. A single number implies more precision than a ~2-5%
-    # typical error actually supports.
-    residual_std = metrics.get("residual_std_log_return")
-    range_low = range_high = None
-    if residual_std:
-        range_low = round(lag1_for_pred * np.exp(pred_log_return - residual_std))
-        range_high = round(lag1_for_pred * np.exp(pred_log_return + residual_std))
-
     recent = g.sort_values("Date").tail(60)[["Date", "Modal"]]
     history = [{"date": d.strftime("%Y-%m-%d"), "modal": float(m)} for d, m in
                zip(recent["Date"], recent["Modal"])]
@@ -307,43 +278,11 @@ def predict_market(market, df):
     last_actual = g.sort_values("Date")["Modal"].iloc[-1]
     last_date = g.sort_values("Date")["Date"].iloc[-1]
 
-    # Retrospective check: what would the model have predicted for the most
-    # recent *actual* tender, using only the data available before it? This
-    # gives an honest "how did we do last time" comparison, alongside the
-    # forward-looking prediction above.
-    last_tender = None
-    g_sorted = g.sort_values("Date")
-    if len(g_sorted) >= 2:
-        hist_before_last = g_sorted.iloc[:-1]
-        last_row_date = g_sorted["Date"].iloc[-1].to_pydatetime()
-        X_last, _ = build_future_row(hist_before_last, feature_cols, last_row_date, metrics)
-        lag1_before_last = hist_before_last["Modal"].iloc[-1]
-        pred_log_return_last = float(model.predict(X_last)[0])
-        pred_last = lag1_before_last * np.exp(pred_log_return_last)
-        actual_last = float(g_sorted["Modal"].iloc[-1])
-        last_tender = {
-            "date": last_row_date.strftime("%Y-%m-%d"),
-            "day_name": DAY_NAMES[last_row_date.weekday()],
-            "predicted": round(pred_last),
-            "actual": round(actual_last),
-            "error_pct": round((pred_last - actual_last) / actual_last * 100, 1) if actual_last else 0,
-        }
-
-    # The tender after the immediate next one, so the board isn't only ever
-    # showing a single upcoming date - pulled from the same forecast used
-    # for the 10-tender outlook below.
-    next_to_next = forecast_points[1] if len(forecast_points) > 1 else None
-    if next_to_next:
-        nn_date = datetime.strptime(next_to_next["date"], "%Y-%m-%d")
-        next_to_next = {**next_to_next, "day_name": DAY_NAMES[nn_date.weekday()]}
-
     return {
         "market": market,
         "target_date": target_date.strftime("%Y-%m-%d"),
         "target_day_name": DAY_NAMES[target_date.weekday()],
         "prediction": round(pred),
-        "range_low": range_low,
-        "range_high": range_high,
         "last_actual": round(float(last_actual)),
         "last_date": last_date.strftime("%Y-%m-%d"),
         "change": round(pred - float(last_actual)),
@@ -359,8 +298,6 @@ def predict_market(market, df):
         "worst_month": worst_month,
         "forecast_points": forecast_points,
         "festival_hits": festival_hits,
-        "last_tender": last_tender,
-        "next_to_next": next_to_next,
     }
 
 
@@ -438,22 +375,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .price-label { text-align: center; font-size: 12px; color: #a99a80; letter-spacing: 2px; margin-bottom: 2px; }
   .predicted-for { text-align: center; font-size: 13px; color: var(--copra-cream); margin-bottom: 16px; }
   .predicted-for b { color: var(--coir-gold); }
-  .range-note { text-align: center; font-size: 12px; color: #a99a80; margin-bottom: 10px; }
   .delta { text-align: center; font-size: 15px; margin-bottom: 6px; }
   .delta.up { color: var(--up-red); }
   .delta.down { color: var(--down-green); }
-  .tender-history {
-    text-align: center; font-size: 12px; color: #a99a80; margin-bottom: 12px;
-    padding-bottom: 10px; border-bottom: 1px dashed #5a4530;
-  }
-  .tender-history b { color: var(--copra-cream); }
-  .tender-history .hit { color: var(--down-green); }
-  .tender-history .miss { color: var(--up-red); }
-  .next-next-tender {
-    text-align: center; font-size: 12px; color: #a99a80; margin-top: 10px;
-    padding-top: 10px; border-top: 1px dashed #5a4530;
-  }
-  .next-next-tender b { color: var(--coir-gold); }
   .meta-row { display: flex; justify-content: space-between; font-size: 12px; color: #a99a80; margin-top: 14px; }
   .accuracy { font-size: 11px; color: #7d715e; text-align: center; margin-top: 10px; }
   .festival-note {
@@ -583,11 +507,9 @@ BOARD_CARD_TEMPLATE = """
     <h2>{market}</h2>
     <span class="tender-tag">NEXT TENDER: {target_day_name} {target_date}</span>
   </div>
-  {last_tender_html}
   <div class="price-label">PREDICTED MODAL PRICE</div>
   <div class="flap">{digit_spans}</div>
   <div class="predicted-for">for <b>{target_day_name}, {target_date}</b></div>
-  <div class="range-note">{range_html}</div>
   <div class="delta {delta_class}">{delta_arrow} Rs {delta_abs:,} ({change_pct}%) vs last actual (Rs {last_actual:,} on {last_date})</div>
   {festival_html}
   <div class="meta-row">
@@ -595,7 +517,6 @@ BOARD_CARD_TEMPLATE = """
     <span>Walk-forward MAPE: {mape}</span>
   </div>
   <div class="accuracy">Typical error: &plusmn; Rs {mae:,} / quintal (averaged across 5 walk-forward validation folds)</div>
-  {next_to_next_html}
 </div>
 """
 
@@ -627,36 +548,11 @@ def render_board_card(res):
     if res.get("festival_note"):
         festival_html = f"<div class='festival-note'>Festival demand window: {res['festival_note']}</div>"
 
-    range_html = ""
-    if res.get("range_low") and res.get("range_high"):
-        range_html = f"likely range: Rs {res['range_low']:,} &ndash; Rs {res['range_high']:,}"
-
-    last_tender_html = ""
-    lt = res.get("last_tender")
-    if lt:
-        hit = abs(lt["error_pct"]) <= 3
-        css = "hit" if hit else "miss"
-        arrow = "&#9650;" if lt["predicted"] >= lt["actual"] else "&#9660;"
-        last_tender_html = (
-            f"<div class='tender-history'>Last tender ({lt['day_name']}, {lt['date']}): "
-            f"we predicted <b>Rs {lt['predicted']:,}</b>, actual came in at <b>Rs {lt['actual']:,}</b> "
-            f"<span class='{css}'>({arrow} {abs(lt['error_pct'])}% off)</span></div>"
-        )
-
-    next_to_next_html = ""
-    nn = res.get("next_to_next")
-    if nn:
-        next_to_next_html = (
-            f"<div class='next-next-tender'>Tender after that ({nn['day_name']}, {nn['date']}): "
-            f"model estimate <b>Rs {nn['modal']:,}</b></div>"
-        )
-
     return BOARD_CARD_TEMPLATE.format(
         market=res["market"],
         target_day_name=res["target_day_name"],
         target_date=res["target_date"],
         digit_spans=digit_spans(res["prediction"]),
-        range_html=range_html,
         delta_class="up" if up else "down",
         delta_arrow="&#9650;" if up else "&#9660;",
         delta_abs=abs(res["change"]),
@@ -667,8 +563,6 @@ def render_board_card(res):
         mape=f"{res['mape']:.1f}%" if res.get("mape") is not None else "n/a",
         mae=int(res["mae"]) if res.get("mae") is not None else 0,
         festival_html=festival_html,
-        last_tender_html=last_tender_html,
-        next_to_next_html=next_to_next_html,
     )
 
 
@@ -740,15 +634,6 @@ def main():
         return
 
     df = pd.read_csv(FEATURES_CSV, parse_dates=["Date"])
-
-    global TENDER_DAYS
-    TENDER_DAYS["TIPTUR"] = detect_tender_days(
-        df.loc[df["Market"] == "TIPTUR", "Date"], fallback=(0, 3))
-    TENDER_DAYS["ARSIKERE"] = detect_tender_days(
-        df.loc[df["Market"] == "ARSIKERE", "Date"], fallback=(1, 4))
-    print(f"Detected tender days (0=Mon...6=Sun) - TIPTUR: {TENDER_DAYS['TIPTUR']}, "
-          f"ARSIKERE: {TENDER_DAYS['ARSIKERE']}")
-
     results = []
     for market in ["TIPTUR", "ARSIKERE"]:
         if market in df["Market"].unique():
