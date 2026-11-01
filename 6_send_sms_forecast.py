@@ -31,6 +31,7 @@ automated schedule.
 """
 
 import os
+import sys
 import re
 import json
 from datetime import datetime, timedelta
@@ -40,12 +41,23 @@ import pandas as pd
 import joblib
 import requests
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+import model_utils
+
+# Ensure console handles Kannada unicode characters cleanly on Windows
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 try:
     import holidays
 except ImportError:
     holidays = None
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 FEATURES_CSV = os.path.join(DATA_DIR, "features.csv")
@@ -73,11 +85,14 @@ def next_tender_date(from_date):
 def is_festival_window_for(date):
     if holidays is None:
         return False, ""
-    in_holidays = holidays.India(years=[date.year, date.year + 1])
-    for hdate, name in in_holidays.items():
-        hdate = pd.Timestamp(hdate)
-        if hdate - timedelta(days=10) <= pd.Timestamp(date) <= hdate:
-            return True, name
+    try:
+        in_holidays = holidays.India(years=[date.year, date.year + 1])
+        for hdate, name in in_holidays.items():
+            hdate = pd.Timestamp(hdate)
+            if hdate - timedelta(days=10) <= pd.Timestamp(date) <= hdate:
+                return True, name
+    except Exception:
+        pass
     return False, ""
 
 
@@ -91,7 +106,7 @@ def compute_best_month(g):
     if by_month.empty:
         return None, None
     best_month = int(by_month["mean"].idxmax())
-    best_pct = round((by_month["mean"].max() - 1) * 100, 1)
+    best_pct = round((by_month["mean"].max() - 1.0) * 100.0, 1)
     return best_month, best_pct
 
 
@@ -107,48 +122,54 @@ def predict_next_tender():
     medians = metrics.get("feature_medians", {})
 
     df = pd.read_csv(FEATURES_CSV, parse_dates=["Date"])
-    g = df[df["Market"] == MARKET].sort_values("Date")
+    g = df[df["Market"] == MARKET].sort_values("Date").reset_index(drop=True)
 
     target_date = next_tender_date(datetime.now())
     festival_flag, festival_name = is_festival_window_for(target_date)
 
-    last3 = g["Modal"].tail(3).tolist()[::-1]
-    while len(last3) < 3:
-        last3.append(np.nan)
-    lag1, lag2, lag3 = last3[0], last3[1], last3[2]
-    roll4, roll12 = g["Modal"].tail(4), g["Modal"].tail(12)
+    last_p = float(g["Modal"].iloc[-1])
+    last_dt = g["Date"].iloc[-1]
+    lp = np.log(g["Modal"])
+    r = lp.diff()
+
+    other_m = "ARSIKERE" if MARKET == "TIPTUR" else "TIPTUR"
+    other_g = df[df["Market"] == other_m].sort_values("Date")
+    other_p = float(other_g["Modal"].iloc[-1]) if len(other_g) else last_p
+    other_ret = float(np.log(other_g["Modal"]).diff(2).iloc[-1]) if len(other_g) >= 3 else 0.0
 
     row = {
-        "modal_lag_1": lag1, "modal_lag_2": lag2, "modal_lag_3": lag3,
-        "modal_roll_mean_4": roll4.mean(), "modal_roll_std_4": roll4.std(),
-        "modal_roll_mean_12": roll12.mean(),
-        "price_momentum": (lag1 - lag2) if pd.notna(lag1) and pd.notna(lag2) else np.nan,
-        "arrivals_lag_1": g["Arrivals"].iloc[-1] if len(g) else np.nan,
-        "arrivals_roll_mean_4": g["Arrivals"].tail(4).mean(),
-        "day_of_week": target_date.weekday(), "month": target_date.month, "year": target_date.year,
-        "days_since_start": (target_date - g["Date"].min().to_pydatetime()).days,
-        "is_tiptur_tenderday": 1, "is_arsikere_tenderday": 0,
-        "is_festival_window": int(festival_flag),
-        "coconut_oil_price_usd_per_mt": g["coconut_oil_price_usd_per_mt"].dropna().iloc[-1]
-            if "coconut_oil_price_usd_per_mt" in g and g["coconut_oil_price_usd_per_mt"].notna().any() else np.nan,
-        "coconut_oil_price_change_1m": g["coconut_oil_price_change_1m"].dropna().iloc[-1]
-            if "coconut_oil_price_change_1m" in g and g["coconut_oil_price_change_1m"].notna().any() else np.nan,
-        "usd_inr_rate": g["usd_inr_rate"].dropna().iloc[-1]
-            if "usd_inr_rate" in g and g["usd_inr_rate"].notna().any() else np.nan,
-        "rainfall_mm": g["rainfall_mm"].tail(30).mean() if "rainfall_mm" in g else np.nan,
-        "temp_c": g["temp_c"].tail(30).mean() if "temp_c" in g else np.nan,
-        "rainfall_roll_90": g["rainfall_roll_90"].dropna().iloc[-1]
-            if "rainfall_roll_90" in g and g["rainfall_roll_90"].notna().any() else np.nan,
-        "other_market_last_price": g["other_market_last_price"].dropna().iloc[-1]
-            if "other_market_last_price" in g and g["other_market_last_price"].notna().any() else np.nan,
+        "ret_lag_1": float(r.iloc[-1]) if len(r) >= 1 else 0.0,
+        "ret_lag_2": float(r.iloc[-2]) if len(r) >= 2 else 0.0,
+        "ret_lag_3": float(r.iloc[-3]) if len(r) >= 3 else 0.0,
+        "ret_lag_4": float(r.iloc[-4]) if len(r) >= 4 else 0.0,
+        "ret_lag_5": float(r.iloc[-5]) if len(r) >= 5 else 0.0,
+        "ret_sum_4": float(r.iloc[-4:].sum()) if len(r) >= 4 else 0.0,
+        "ret_sum_12": float(r.iloc[-12:].sum()) if len(r) >= 12 else 0.0,
+        "vol_4": float(r.iloc[-4:].std()) if len(r) >= 4 and not pd.isna(r.iloc[-4:].std()) else 0.02,
+        "vol_12": float(r.iloc[-12:].std()) if len(r) >= 12 and not pd.isna(r.iloc[-12:].std()) else 0.03,
+        "trend_gap_12": float(lp.iloc[-1] - np.log(g["Modal"].iloc[-12:].mean())) if len(g) >= 12 else 0.0,
+        "trend_gap_26": float(lp.iloc[-1] - np.log(g["Modal"].iloc[-26:].mean())) if len(g) >= 26 else 0.0,
+        "arr_ratio": float(np.log1p(g["Arrivals"].clip(lower=0)).iloc[-1] - np.log1p(g["Arrivals"].clip(lower=0)).iloc[-12:].mean()) if len(g) >= 12 else 0.0,
+        "gap_days": float((target_date - last_dt.to_pydatetime()).days),
+        "spread_other": float(lp.iloc[-1] - np.log(other_p)),
+        "other_ret_4d": other_ret,
+        "month_sin": float(np.sin(2.0 * np.pi * target_date.month / 12.0)),
+        "month_cos": float(np.cos(2.0 * np.pi * target_date.month / 12.0)),
+        "oil_chg_30d": float(g["oil_chg_30d"].dropna().iloc[-1]) if "oil_chg_30d" in g and g["oil_chg_30d"].notna().any() else 0.0,
+        "oil_chg_90d": float(g["oil_chg_90d"].dropna().iloc[-1]) if "oil_chg_90d" in g and g["oil_chg_90d"].notna().any() else 0.0,
+        "fx_chg_30d": float(g["fx_chg_30d"].dropna().iloc[-1]) if "fx_chg_30d" in g and g["fx_chg_30d"].notna().any() else 0.0,
+        "rain_90d": float(g["rain_90d"].dropna().iloc[-1]) if "rain_90d" in g and g["rain_90d"].notna().any() else 0.0,
+        "rain_30d": float(g["rain_30d"].dropna().iloc[-1]) if "rain_30d" in g and g["rain_30d"].notna().any() else 0.0,
+        "is_festival_window": float(festival_flag),
     }
+
     for col in feature_cols:
         if col not in row or pd.isna(row[col]):
-            row[col] = medians.get(col, 0)
+            row[col] = float(medians.get(col, 0.0))
 
     X = pd.DataFrame([{c: row[c] for c in feature_cols}])
     pred_log_return = float(model.predict(X)[0])
-    pred = round(lag1 * np.exp(pred_log_return))
+    pred = round(last_p * np.exp(pred_log_return))
 
     best_month, best_pct = compute_best_month(g)
     best_month_kn = MONTH_NAMES_KN.get(best_month, "")
@@ -188,7 +209,7 @@ def send_sms(message):
     user = os.environ.get("SMS_GATEWAY_USER")
     password = os.environ.get("SMS_GATEWAY_PASS")
     father_phone = os.environ.get("FATHER_PHONE_NUMBER")
-    extra_phones = os.environ.get("EXTRA_PHONE_NUMBERS", "")  # comma-separated, e.g. your own number
+    extra_phones = os.environ.get("EXTRA_PHONE_NUMBERS", "")
 
     extra_list = [p.strip() for p in re.split(r"[,\n\s]+", extra_phones) if p.strip()]
     phones = [p.strip() for p in [father_phone] + extra_list if p and p.strip()]

@@ -12,8 +12,11 @@ and keeps going with the next step where possible, so a single flaky source
 doesn't block the whole run.
 """
 
+import os
 import subprocess
 import sys
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 STEPS = [
     "1_scrape_incremental.py",
@@ -28,7 +31,8 @@ def run(script):
     print("\n" + "=" * 70, flush=True)
     print(f"RUNNING {script}", flush=True)
     print("=" * 70, flush=True)
-    result = subprocess.run([sys.executable, "-u", script])
+    script_path = os.path.join(BASE_DIR, script)
+    result = subprocess.run([sys.executable, "-u", script_path], cwd=BASE_DIR)
     if result.returncode != 0:
         print(f"\n!! {script} exited with an error (code {result.returncode}). "
               f"Continuing to the next step anyway.", flush=True)

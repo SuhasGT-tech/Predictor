@@ -18,9 +18,15 @@ What changed vs. the original 3/4 scripts
 Run:  python reliable_pipeline.py
 Out:  models/reliable_report.json, data/clean_features.csv
 """
-import os, json, warnings
+import os, sys, json, warnings
 import numpy as np
 import pandas as pd
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 warnings.filterwarnings("ignore")
 BASE = os.path.dirname(os.path.abspath(__file__))

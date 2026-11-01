@@ -16,6 +16,7 @@ Then open dashboard.html in any browser (double-click it).
 """
 
 import os
+import sys
 import json
 from datetime import datetime, timedelta
 
@@ -23,12 +24,17 @@ import numpy as np
 import pandas as pd
 import joblib
 
+# Ensure model_utils can be imported both when run directly and when imported
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+import model_utils
+
 try:
     import holidays
 except ImportError:
     holidays = None
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 FEATURES_CSV = os.path.join(DATA_DIR, "features.csv")
@@ -54,67 +60,71 @@ def next_tender_date(market, from_date):
 def is_festival_window_for(date):
     if holidays is None:
         return 0, ""
-    in_holidays = holidays.India(years=[date.year, date.year + 1])
-    for hdate, name in in_holidays.items():
-        hdate = pd.Timestamp(hdate)
-        if hdate - timedelta(days=10) <= pd.Timestamp(date) <= hdate:
-            return 1, name
+    try:
+        in_holidays = holidays.India(years=[date.year, date.year + 1])
+        for hdate, name in in_holidays.items():
+            hdate = pd.Timestamp(hdate)
+            if hdate - timedelta(days=10) <= pd.Timestamp(date) <= hdate:
+                return 1, name
+    except Exception:
+        pass
     return 0, ""
 
 
-def build_future_row(market_hist, feature_cols, target_date, metrics):
-    """Construct the single feature row for the next tender date, using the
-    most recent known values as the best available estimate for anything
-    we can't know in advance (weather, global oil price, fx rate)."""
-    g = market_hist.sort_values("Date")
-    last3 = g["Modal"].tail(3).tolist()[::-1]  # most recent first
-    while len(last3) < 3:
-        last3.append(np.nan)
-    lag1, lag2, lag3 = last3[0], last3[1], last3[2]
-
-    roll4 = g["Modal"].tail(4)
-    roll12 = g["Modal"].tail(12)
-    arrivals_tail4 = g["Arrivals"].tail(4)
+def build_future_row(market_hist, feature_cols, target_date, metrics, all_df=None):
+    """
+    Constructs the stationary feature row for the next tender date, using
+    the latest actual tender prices, returns, momentum, spreads, and macro factors.
+    """
+    g = market_hist.sort_values("Date").reset_index(drop=True)
+    last_p = float(g["Modal"].iloc[-1])
+    last_dt = g["Date"].iloc[-1]
+    
+    lp = np.log(g["Modal"])
+    r = lp.diff()
+    
+    # Identify neighbour market price and return for spread features
+    current_market = g["Market"].iloc[-1]
+    other_market = "TIPTUR" if current_market == "ARSIKERE" else "ARSIKERE"
+    if all_df is not None and other_market in all_df["Market"].values:
+        other_g = all_df[all_df["Market"] == other_market].sort_values("Date")
+    else:
+        other_g = g
+    other_p = float(other_g["Modal"].iloc[-1]) if len(other_g) else last_p
+    other_ret = float(np.log(other_g["Modal"]).diff(2).iloc[-1]) if len(other_g) >= 3 else 0.0
 
     festival_flag, festival_name = is_festival_window_for(target_date)
 
     row = {
-        "modal_lag_1": lag1,
-        "modal_lag_2": lag2,
-        "modal_lag_3": lag3,
-        "modal_roll_mean_4": roll4.mean(),
-        "modal_roll_std_4": roll4.std(),
-        "modal_roll_mean_12": roll12.mean(),
-        "price_momentum": (lag1 - lag2) if pd.notna(lag1) and pd.notna(lag2) else np.nan,
-        "arrivals_lag_1": g["Arrivals"].iloc[-1] if len(g) else np.nan,
-        "arrivals_roll_mean_4": arrivals_tail4.mean(),
-        "day_of_week": target_date.weekday(),
-        "month": target_date.month,
-        "year": target_date.year,
-        "days_since_start": (target_date - g["Date"].min().to_pydatetime()).days,
-        "is_tiptur_tenderday": int(target_date.weekday() in TENDER_DAYS["TIPTUR"]),
-        "is_arsikere_tenderday": int(target_date.weekday() in TENDER_DAYS["ARSIKERE"]),
-        "coconut_oil_price_usd_per_mt": g["coconut_oil_price_usd_per_mt"].dropna().iloc[-1]
-            if "coconut_oil_price_usd_per_mt" in g and g["coconut_oil_price_usd_per_mt"].notna().any() else np.nan,
-        "coconut_oil_price_change_1m": g["coconut_oil_price_change_1m"].dropna().iloc[-1]
-            if "coconut_oil_price_change_1m" in g and g["coconut_oil_price_change_1m"].notna().any() else np.nan,
-        "usd_inr_rate": g["usd_inr_rate"].dropna().iloc[-1]
-            if "usd_inr_rate" in g and g["usd_inr_rate"].notna().any() else np.nan,
-        "rainfall_mm": g["rainfall_mm"].tail(30).mean() if "rainfall_mm" in g else np.nan,
-        "temp_c": g["temp_c"].tail(30).mean() if "temp_c" in g else np.nan,
-        "rainfall_roll_90": g["rainfall_roll_90"].dropna().iloc[-1]
-            if "rainfall_roll_90" in g and g["rainfall_roll_90"].notna().any() else np.nan,
-        "other_market_last_price": g["other_market_last_price"].dropna().iloc[-1]
-            if "other_market_last_price" in g and g["other_market_last_price"].notna().any() else np.nan,
-        "is_festival_window": festival_flag,
+        "ret_lag_1": float(r.iloc[-1]) if len(r) >= 1 else 0.0,
+        "ret_lag_2": float(r.iloc[-2]) if len(r) >= 2 else 0.0,
+        "ret_lag_3": float(r.iloc[-3]) if len(r) >= 3 else 0.0,
+        "ret_lag_4": float(r.iloc[-4]) if len(r) >= 4 else 0.0,
+        "ret_lag_5": float(r.iloc[-5]) if len(r) >= 5 else 0.0,
+        "ret_sum_4": float(r.iloc[-4:].sum()) if len(r) >= 4 else 0.0,
+        "ret_sum_12": float(r.iloc[-12:].sum()) if len(r) >= 12 else 0.0,
+        "vol_4": float(r.iloc[-4:].std()) if len(r) >= 4 and not pd.isna(r.iloc[-4:].std()) else 0.02,
+        "vol_12": float(r.iloc[-12:].std()) if len(r) >= 12 and not pd.isna(r.iloc[-12:].std()) else 0.03,
+        "trend_gap_12": float(lp.iloc[-1] - np.log(g["Modal"].iloc[-12:].mean())) if len(g) >= 12 else 0.0,
+        "trend_gap_26": float(lp.iloc[-1] - np.log(g["Modal"].iloc[-26:].mean())) if len(g) >= 26 else 0.0,
+        "arr_ratio": float(np.log1p(g["Arrivals"].clip(lower=0)).iloc[-1] - np.log1p(g["Arrivals"].clip(lower=0)).iloc[-12:].mean()) if len(g) >= 12 else 0.0,
+        "gap_days": float((target_date - last_dt.to_pydatetime()).days),
+        "spread_other": float(lp.iloc[-1] - np.log(other_p)),
+        "other_ret_4d": other_ret,
+        "month_sin": float(np.sin(2.0 * np.pi * target_date.month / 12.0)),
+        "month_cos": float(np.cos(2.0 * np.pi * target_date.month / 12.0)),
+        "oil_chg_30d": float(g["oil_chg_30d"].dropna().iloc[-1]) if "oil_chg_30d" in g and g["oil_chg_30d"].notna().any() else 0.0,
+        "oil_chg_90d": float(g["oil_chg_90d"].dropna().iloc[-1]) if "oil_chg_90d" in g and g["oil_chg_90d"].notna().any() else 0.0,
+        "fx_chg_30d": float(g["fx_chg_30d"].dropna().iloc[-1]) if "fx_chg_30d" in g and g["fx_chg_30d"].notna().any() else 0.0,
+        "rain_90d": float(g["rain_90d"].dropna().iloc[-1]) if "rain_90d" in g and g["rain_90d"].notna().any() else 0.0,
+        "rain_30d": float(g["rain_30d"].dropna().iloc[-1]) if "rain_30d" in g and g["rain_30d"].notna().any() else 0.0,
+        "is_festival_window": float(festival_flag),
     }
 
-    # Fill anything still missing with the training medians so the model
-    # never sees a NaN it wasn't trained to expect
     medians = metrics.get("feature_medians", {})
     for col in feature_cols:
         if col not in row or pd.isna(row[col]):
-            row[col] = medians.get(col, 0)
+            row[col] = float(medians.get(col, 0.0))
 
     return pd.DataFrame([{c: row[c] for c in feature_cols}]), festival_name
 
@@ -126,11 +136,8 @@ MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June",
 def compute_seasonality(g):
     """
     For each historical row, express its price as a ratio to that YEAR's
-    average price (this detrends 24 years of inflation/growth so we're
-    comparing pure calendar-month seasonality, not "prices were higher
-    recently because prices are higher recently").
-    Returns a list of {month, month_name, index} sorted by month, plus
-    the single best month to sell (highest average ratio).
+    average price (detrending 15+ years of growth to compare pure calendar-month
+    seasonality).
     """
     g = g.copy()
     g["year"] = g["Date"].dt.year
@@ -138,11 +145,11 @@ def compute_seasonality(g):
     g["seasonal_ratio"] = g["Modal"] / yearly_mean
 
     by_month = g.groupby(g["Date"].dt.month)["seasonal_ratio"].agg(["mean", "count"])
-    by_month = by_month[by_month["count"] >= 3]  # need a few observations to trust it
+    by_month = by_month[by_month["count"] >= 3]
 
     result = [
         {"month": int(m), "month_name": MONTH_NAMES[int(m)],
-         "index": round((row["mean"] - 1) * 100, 1)}
+         "index": round((row["mean"] - 1.0) * 100.0, 1)}
         for m, row in by_month.iterrows()
     ]
     result.sort(key=lambda r: r["month"])
@@ -156,42 +163,32 @@ def compute_seasonality(g):
     return result, best, worst
 
 
-def forecast_horizon(market, g, model, feature_cols, metrics, n_tenders=10):
+def forecast_horizon(market, g, model, feature_cols, metrics, n_tenders=10, all_df=None):
     """
-    Recursively forecast the next `n_tenders` tender days for this market,
-    feeding each prediction back in as if it were the "actual" price for
-    the next step's lag features. This is how you get a multi-week outlook
-    instead of just a single next-day number.
-
-    CAVEAT (also shown in the dashboard): external factors (weather, global
-    oil price, fx rate) are held at their most recent known value for every
-    future step, since we can't know them in advance. Accuracy naturally
-    degrades the further out you look - treat this as a directional guide
-    ("prices look like they're drifting up/down, and here's roughly why"),
-    not a precise multi-week price quote.
+    Recursively forecasts the next `n_tenders` tender days for this market,
+    dynamically rolling forward returns and trend gaps.
     """
-    g = g.sort_values("Date")
+    g = g.sort_values("Date").reset_index(drop=True)
     medians = metrics.get("feature_medians", {})
 
-    # Rolling state we'll update as we "generate" future prices
-    recent_prices = g["Modal"].tail(12).tolist()  # most recent last
-    recent_arrivals = g["Arrivals"].tail(4).tolist()
+    recent_prices = [float(x) for x in g["Modal"].tail(30).tolist()]
+    recent_arrivals = [float(x) for x in g["Arrivals"].tail(12).tolist()]
     current_date = datetime.now()
-    start_of_history = g["Date"].min().to_pydatetime()
+
+    other_market = "TIPTUR" if market == "ARSIKERE" else "ARSIKERE"
+    if all_df is not None and other_market in all_df["Market"].values:
+        other_g = all_df[all_df["Market"] == other_market].sort_values("Date")
+    else:
+        other_g = g
+    other_price = float(other_g["Modal"].iloc[-1]) if len(other_g) else recent_prices[-1]
+    other_ret = float(np.log(other_g["Modal"]).diff(2).iloc[-1]) if len(other_g) >= 3 else 0.0
 
     static_ext = {
-        "coconut_oil_price_usd_per_mt": g["coconut_oil_price_usd_per_mt"].dropna().iloc[-1]
-            if "coconut_oil_price_usd_per_mt" in g and g["coconut_oil_price_usd_per_mt"].notna().any() else medians.get("coconut_oil_price_usd_per_mt", 0),
-        "coconut_oil_price_change_1m": g["coconut_oil_price_change_1m"].dropna().iloc[-1]
-            if "coconut_oil_price_change_1m" in g and g["coconut_oil_price_change_1m"].notna().any() else medians.get("coconut_oil_price_change_1m", 0),
-        "usd_inr_rate": g["usd_inr_rate"].dropna().iloc[-1]
-            if "usd_inr_rate" in g and g["usd_inr_rate"].notna().any() else medians.get("usd_inr_rate", 0),
-        "rainfall_mm": g["rainfall_mm"].tail(30).mean() if "rainfall_mm" in g else medians.get("rainfall_mm", 0),
-        "temp_c": g["temp_c"].tail(30).mean() if "temp_c" in g else medians.get("temp_c", 0),
-        "rainfall_roll_90": g["rainfall_roll_90"].dropna().iloc[-1]
-            if "rainfall_roll_90" in g and g["rainfall_roll_90"].notna().any() else medians.get("rainfall_roll_90", 0),
-        "other_market_last_price": g["other_market_last_price"].dropna().iloc[-1]
-            if "other_market_last_price" in g and g["other_market_last_price"].notna().any() else medians.get("other_market_last_price", 0),
+        "oil_chg_30d": float(g["oil_chg_30d"].dropna().iloc[-1]) if "oil_chg_30d" in g and g["oil_chg_30d"].notna().any() else float(medians.get("oil_chg_30d", 0.0)),
+        "oil_chg_90d": float(g["oil_chg_90d"].dropna().iloc[-1]) if "oil_chg_90d" in g and g["oil_chg_90d"].notna().any() else float(medians.get("oil_chg_90d", 0.0)),
+        "fx_chg_30d": float(g["fx_chg_30d"].dropna().iloc[-1]) if "fx_chg_30d" in g and g["fx_chg_30d"].notna().any() else float(medians.get("fx_chg_30d", 0.0)),
+        "rain_90d": float(g["rain_90d"].dropna().iloc[-1]) if "rain_90d" in g and g["rain_90d"].notna().any() else float(medians.get("rain_90d", 0.0)),
+        "rain_30d": float(g["rain_30d"].dropna().iloc[-1]) if "rain_30d" in g and g["rain_30d"].notna().any() else float(medians.get("rain_30d", 0.0)),
     }
 
     forecast_points = []
@@ -201,33 +198,54 @@ def forecast_horizon(market, g, model, feature_cols, metrics, n_tenders=10):
         target_date = next_tender_date(market, current_date)
         festival_flag, festival_name = is_festival_window_for(target_date)
 
-        lag1 = recent_prices[-1] if recent_prices else medians.get("modal_lag_1", 0)
-        lag2 = recent_prices[-2] if len(recent_prices) >= 2 else lag1
-        lag3 = recent_prices[-3] if len(recent_prices) >= 3 else lag2
-        roll4 = pd.Series(recent_prices[-4:])
-        roll12 = pd.Series(recent_prices[-12:])
+        rets = np.diff(np.log(recent_prices))
+        lag_rets = rets[-5:][::-1] if len(rets) >= 5 else [0.0]*5
+
+        roll4_ret = float(rets[-4:].sum()) if len(rets) >= 4 else 0.0
+        roll12_ret = float(rets[-12:].sum()) if len(rets) >= 12 else 0.0
+        vol4 = float(np.std(rets[-4:])) if len(rets) >= 4 else 0.02
+        vol12 = float(np.std(rets[-12:])) if len(rets) >= 12 else 0.03
+
+        last_price = recent_prices[-1]
+        mean12 = float(np.mean(recent_prices[-12:]))
+        mean26 = float(np.mean(recent_prices[-26:]))
+        trend_gap12 = float(np.log(last_price) - np.log(mean12))
+        trend_gap26 = float(np.log(last_price) - np.log(mean26))
+
+        arr_series = pd.Series(recent_arrivals)
+        arr_ratio = float(np.log1p(arr_series.iloc[-1]) - np.log1p(arr_series).mean())
 
         row = {
-            "modal_lag_1": lag1, "modal_lag_2": lag2, "modal_lag_3": lag3,
-            "modal_roll_mean_4": roll4.mean(), "modal_roll_std_4": roll4.std(),
-            "modal_roll_mean_12": roll12.mean(),
-            "price_momentum": lag1 - lag2,
-            "arrivals_lag_1": recent_arrivals[-1] if recent_arrivals else medians.get("arrivals_lag_1", 0),
-            "arrivals_roll_mean_4": (pd.Series(recent_arrivals).mean() if recent_arrivals else medians.get("arrivals_roll_mean_4", 0)),
-            "day_of_week": target_date.weekday(), "month": target_date.month, "year": target_date.year,
-            "days_since_start": (target_date - start_of_history).days,
-            "is_tiptur_tenderday": int(target_date.weekday() in TENDER_DAYS["TIPTUR"]),
-            "is_arsikere_tenderday": int(target_date.weekday() in TENDER_DAYS["ARSIKERE"]),
-            "is_festival_window": festival_flag,
+            "ret_lag_1": float(lag_rets[0]),
+            "ret_lag_2": float(lag_rets[1]) if len(lag_rets) > 1 else 0.0,
+            "ret_lag_3": float(lag_rets[2]) if len(lag_rets) > 2 else 0.0,
+            "ret_lag_4": float(lag_rets[3]) if len(lag_rets) > 3 else 0.0,
+            "ret_lag_5": float(lag_rets[4]) if len(lag_rets) > 4 else 0.0,
+            "ret_sum_4": roll4_ret,
+            "ret_sum_12": roll12_ret,
+            "vol_4": vol4,
+            "vol_12": vol12,
+            "trend_gap_12": trend_gap12,
+            "trend_gap_26": trend_gap26,
+            "arr_ratio": arr_ratio,
+            "gap_days": float((target_date - current_date).days),
+            "spread_other": float(np.log(last_price) - np.log(other_price)),
+            "other_ret_4d": other_ret,
+            "month_sin": float(np.sin(2.0 * np.pi * target_date.month / 12.0)),
+            "month_cos": float(np.cos(2.0 * np.pi * target_date.month / 12.0)),
+            "is_festival_window": float(festival_flag),
             **static_ext,
         }
+
         for col in feature_cols:
             if col not in row or pd.isna(row[col]):
-                row[col] = medians.get(col, 0)
+                row[col] = float(medians.get(col, 0.0))
 
         X = pd.DataFrame([{c: row[c] for c in feature_cols}])
         pred_log_return = float(model.predict(X)[0])
-        pred = lag1 * np.exp(pred_log_return)
+        # Smooth bounds to prevent compound extrapolation explosion
+        pred_log_return = float(np.clip(pred_log_return, -0.04, 0.04))
+        pred = last_price * np.exp(pred_log_return)
 
         forecast_points.append({
             "date": target_date.strftime("%Y-%m-%d"),
@@ -238,7 +256,7 @@ def forecast_horizon(market, g, model, feature_cols, metrics, n_tenders=10):
             festival_hits.append({"date": target_date.strftime("%Y-%m-%d"), "name": festival_name})
 
         recent_prices.append(pred)
-        recent_arrivals.append(recent_arrivals[-1] if recent_arrivals else 0)
+        recent_arrivals.append(recent_arrivals[-1] if recent_arrivals else 0.0)
         current_date = target_date
 
     return forecast_points, festival_hits
@@ -260,11 +278,11 @@ def predict_market(market, df):
         with open(metrics_path) as f:
             metrics = json.load(f)
 
-    g = df[df["Market"] == market].copy()
+    g = df[df["Market"] == market].copy().sort_values("Date").reset_index(drop=True)
     target_date = next_tender_date(market, datetime.now())
 
-    X_future, festival_name = build_future_row(g, feature_cols, target_date, metrics)
-    lag1_for_pred = g.sort_values("Date")["Modal"].iloc[-1]
+    X_future, festival_name = build_future_row(g, feature_cols, target_date, metrics, all_df=df)
+    lag1_for_pred = float(g["Modal"].iloc[-1])
     pred_log_return = float(model.predict(X_future)[0])
     pred = lag1_for_pred * np.exp(pred_log_return)
 
@@ -273,10 +291,10 @@ def predict_market(market, df):
                zip(recent["Date"], recent["Modal"])]
 
     seasonality, best_month, worst_month = compute_seasonality(g)
-    forecast_points, festival_hits = forecast_horizon(market, g, model, feature_cols, metrics, n_tenders=10)
+    forecast_points, festival_hits = forecast_horizon(market, g, model, feature_cols, metrics, n_tenders=10, all_df=df)
 
-    last_actual = g.sort_values("Date")["Modal"].iloc[-1]
-    last_date = g.sort_values("Date")["Date"].iloc[-1]
+    last_actual = float(g["Modal"].iloc[-1])
+    last_date = g["Date"].iloc[-1]
 
     return {
         "market": market,
@@ -286,7 +304,7 @@ def predict_market(market, df):
         "last_actual": round(float(last_actual)),
         "last_date": last_date.strftime("%Y-%m-%d"),
         "change": round(pred - float(last_actual)),
-        "change_pct": round((pred - float(last_actual)) / float(last_actual) * 100, 1) if last_actual else 0,
+        "change_pct": round((pred - float(last_actual)) / float(last_actual) * 100.0, 1) if last_actual else 0.0,
         "mae": metrics.get("mae"),
         "mape": metrics.get("mape"),
         "model_type": metrics.get("model_type", "model"),
@@ -426,7 +444,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
   <div class="chart-wrap">
-    <h3>Seasonality — average price vs. that year's own average, by month (24-yr history)</h3>
+    <h3>Seasonality — average price vs. that year's own average, by month</h3>
     <canvas id="seasonChart" height="80"></canvas>
   </div>
 
@@ -435,7 +453,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
   <footer>
-    Predictions are a statistical estimate from historical patterns, not a guarantee &mdash;
+    Predictions are a statistical estimate from historical APMC patterns &mdash;
     treat as one input alongside your own market knowledge. The 10-tender outlook assumes
     weather/global-price/fx stay near their current levels, so treat it as directional,
     not a precise multi-week quote.<br>
@@ -516,7 +534,7 @@ BOARD_CARD_TEMPLATE = """
     <span>Model: {model_type}</span>
     <span>Walk-forward MAPE: {mape}</span>
   </div>
-  <div class="accuracy">Typical error: &plusmn; Rs {mae:,} / quintal (averaged across 5 walk-forward validation folds)</div>
+  <div class="accuracy">Typical error: &plusmn; Rs {mae:,} / quintal (averaged across walk-forward validation folds)</div>
 </div>
 """
 
@@ -566,15 +584,39 @@ def render_board_card(res):
     )
 
 
+FEATURE_LABELS = {
+    "spread_other": "Spread vs other market",
+    "other_ret_4d": "Other market price momentum",
+    "trend_gap_12": "6-week trend gap (mean reversion)",
+    "trend_gap_26": "Quarterly trend gap",
+    "vol_12": "Recent price volatility",
+    "ret_lag_1": "Last tender return",
+    "ret_lag_2": "2nd last tender return",
+    "ret_sum_4": "2-week price momentum",
+    "ret_sum_12": "6-week price momentum",
+    "arr_ratio": "Arrival volume shock",
+    "oil_chg_30d": "Global coconut oil 30d change",
+    "oil_chg_90d": "Global coconut oil 90d change",
+    "fx_chg_30d": "USD/INR exchange rate change",
+    "rain_90d": "90-day cumulative rainfall",
+    "rain_30d": "30-day cumulative rainfall",
+    "gap_days": "Days since previous tender",
+    "month_sin": "Annual seasonal cycle",
+    "month_cos": "Annual seasonal cycle",
+    "is_festival_window": "Festival demand window",
+}
+
+
 def render_feature_card(res):
     if res is None or not res.get("top_features"):
         return ""
-    max_imp = max(f["importance"] for f in res["top_features"]) or 1
+    max_imp = max(f["importance"] for f in res["top_features"]) or 1.0
     rows = ""
     for f in res["top_features"][:6]:
-        pct = f["importance"] / max_imp * 100
+        pct = f["importance"] / max_imp * 100.0
+        label = FEATURE_LABELS.get(f["feature"], f["feature"])
         rows += (
-            f"<div class='feature-bar-row'><span>{f['feature']}</span>"
+            f"<div class='feature-bar-row' title='{f['feature']}'><span>{label}</span>"
             f"<div class='feature-bar-bg'><div class='feature-bar-fill' style='width:{pct:.0f}%'></div></div>"
             f"<span>{f['importance']:.2f}</span></div>"
         )
@@ -604,7 +646,6 @@ def render_outlook_card(res):
 
     if res.get("forecast_points"):
         last = res["forecast_points"][-1]
-        first = res["forecast_points"][0]
         drift = last["modal"] - res["last_actual"]
         direction = "up" if drift > 0 else "down" if drift < 0 else "flat"
         items.append(
@@ -689,6 +730,12 @@ def main():
 
     with open(OUT_HTML, "w", encoding="utf-8") as f:
         f.write(html)
+
+    # Also sync docs/index.html if docs directory exists for GitHub Pages
+    docs_dir = os.path.join(BASE_DIR, "docs")
+    if os.path.exists(docs_dir):
+        with open(os.path.join(docs_dir, "index.html"), "w", encoding="utf-8") as f:
+            f.write(html)
 
     print(f"\nDashboard saved to {OUT_HTML} -- open it in your browser.")
 
